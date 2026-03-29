@@ -312,8 +312,6 @@ class XLerobot2Wheels(Robot):
             self.bus1.write("I_Coefficient", name, 0)
             self.bus1.write("D_Coefficient", name, 43)
             self.bus1.write("Torque_Limit", name, 600)
-            self.bus1.write("Max_Temperature_Limit", name, 85)
-            self.bus1.write("Over_Current_Protection_Time", name, 200)
 
         for name in self.head_motors:
             self.bus1.write("Operating_Mode", name, OperatingMode.POSITION.value)
@@ -321,8 +319,6 @@ class XLerobot2Wheels(Robot):
             self.bus1.write("I_Coefficient", name, 0)
             self.bus1.write("D_Coefficient", name, 43)
             self.bus1.write("Torque_Limit", name, 600)
-            self.bus1.write("Max_Temperature_Limit", name, 85)
-            self.bus1.write("Over_Current_Protection_Time", name, 200)
 
         for name in self.right_arm_motors:
             self.bus2.write("Operating_Mode", name, OperatingMode.POSITION.value)
@@ -330,34 +326,47 @@ class XLerobot2Wheels(Robot):
             self.bus2.write("I_Coefficient", name, 0)
             self.bus2.write("D_Coefficient", name, 43)
             self.bus2.write("Torque_Limit", name, 600)
-            self.bus2.write("Max_Temperature_Limit", name, 85)
-            self.bus2.write("Over_Current_Protection_Time", name, 200)
 
         for name in self.base_motors:
             self.bus2.write("Operating_Mode", name, OperatingMode.VELOCITY.value)
 
         # Set Goal_Position to current position before enabling torque
-        # to prevent sudden jumps
-        pos1 = self.bus1.sync_read("Present_Position",
-                                    self.left_arm_motors + self.head_motors,
-                                    normalize=False)
-        for name, val in pos1.items():
-            self.bus1.write("Goal_Position", name, val, normalize=False)
-
-        pos2 = self.bus2.sync_read("Present_Position",
-                                    self.right_arm_motors,
-                                    normalize=False)
-        for name, val in pos2.items():
-            self.bus2.write("Goal_Position", name, val, normalize=False)
-
-        # Enable torque one motor at a time
+        # to prevent sudden jumps. Write individually with error handling.
         import time as _time
         for name in self.left_arm_motors + self.head_motors:
-            self.bus1.write("Torque_Enable", name, 1)
+            try:
+                pos = self.bus1.sync_read("Present_Position", [name], normalize=False)
+                self.bus1.write("Goal_Position", name, pos[name], normalize=False)
+            except Exception:
+                pass
+
+        for name in self.right_arm_motors:
+            try:
+                pos = self.bus2.sync_read("Present_Position", [name], normalize=False)
+                self.bus2.write("Goal_Position", name, pos[name], normalize=False)
+            except Exception:
+                pass
+
+        # Enable arm motors first (no head — head causes current spike)
+        for name in self.left_arm_motors:
+            try:
+                self.bus1.write("Torque_Enable", name, 1)
+            except Exception:
+                print(f"[WARN] Failed to enable torque on {name}, skipping")
             _time.sleep(0.05)
         for name in self.right_arm_motors + self.base_motors:
-            self.bus2.write("Torque_Enable", name, 1)
+            try:
+                self.bus2.write("Torque_Enable", name, 1)
+            except Exception:
+                print(f"[WARN] Failed to enable torque on {name}, skipping")
             _time.sleep(0.05)
+
+        # Enable head motors last with low torque limit (already set to 300)
+        _time.sleep(0.5)
+        for name in self.head_motors:
+            self.bus1.write("Torque_Limit", name, 600)
+            self.bus1.write("Torque_Enable", name, 1)
+            _time.sleep(0.2)
         
 
     def setup_motors(self) -> None:
@@ -450,8 +459,8 @@ class XLerobot2Wheels(Robot):
         right_wheel_raw = self._degps_to_raw(right_wheel_degps)
 
         return {
-            "base_left_wheel": left_wheel_raw,
-            "base_right_wheel": right_wheel_raw,
+            "base_left_wheel": -right_wheel_raw,
+            "base_right_wheel": left_wheel_raw,
         }
 
     def _wheel_raw_to_body(

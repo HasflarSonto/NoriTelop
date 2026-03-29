@@ -227,20 +227,23 @@ class SimpleTeleopArm:
             segment_duration=1.01 # 3 seconds per line segment
         )
 
-    def move_to_zero_position(self, robot):
-        print(f"[{self.prefix}] Moving to Zero Position: {self.zero_pos} ......")
-        self.target_positions = self.zero_pos.copy()  # Use copy to avoid reference issues
-        
-        # Reset kinematic variables to their initial state
+    def move_to_zero_position(self, robot, obs=None, bus=None):
+        print(f"[{self.prefix}] Moving to Zero Position......")
+        self.target_positions = self.zero_pos.copy()
         self.current_x = 0.1629
         self.current_y = 0.1131
         self.pitch = 0.0
-        
-        # Don't let handle_keys recalculate wrist_flex - set it explicitly
         self.target_positions["wrist_flex"] = 0.0
-        
-        action = self.p_control_action(robot)
-        robot.send_action(action)
+
+        action = self.p_control_action(robot, obs)
+        if bus:
+            for name, val in {k.replace(".pos", ""): v for k, v in action.items()}.items():
+                try:
+                    bus.write("Goal_Position", name, val)
+                except Exception:
+                    pass
+        else:
+            robot.send_action(action)
 
     def execute_rectangular_trajectory(self, robot, fps=30):
         """
@@ -484,6 +487,87 @@ class SmoothBaseController:
 # Global smooth controller instance
 smooth_controller = SmoothBaseController()
 
+
+class StallDetector:
+    """Monitors motor current and position to detect stalls.
+    - Gripper: on stall, reduce to GRIP_TORQUE (hold pressure) immediately. No retry.
+    - Other joints: retry once, then reduce to STALL_TORQUE until target changes."""
+
+    CURRENT_THRESHOLD = 30
+    POS_EPSILON = 5
+    STALL_LOOPS = 15
+    NORMAL_TORQUE = 600
+    STALL_TORQUE = 100
+    GRIP_TORQUE = 200       # holding torque for gripper when gripping
+
+    def __init__(self):
+        self.prev_pos = {}
+        self.stall_count = {}
+        self.stalled = {}
+        self.retried = {}
+        self.stall_target = {}
+
+    def update(self, bus, motor_names, current_targets=None):
+        try:
+            positions = bus.sync_read("Present_Position", motor_names, normalize=False)
+            currents = bus.sync_read("Present_Current", motor_names, normalize=False)
+        except Exception:
+            return
+
+        for name in motor_names:
+            pos = positions.get(name, 0)
+            cur = currents.get(name, 0)
+            prev = self.prev_pos.get(name, pos)
+            delta = abs(pos - prev)
+            self.prev_pos[name] = pos
+            is_gripper = "gripper" in name
+
+            # If stalled and target has changed, restore torque
+            if self.stalled.get(name) and current_targets:
+                new_target = current_targets.get(name)
+                old_target = self.stall_target.get(name)
+                if new_target is not None and old_target is not None:
+                    if abs(new_target - old_target) > 10:
+                        self.stalled[name] = False
+                        self.retried[name] = False
+                        self.stall_count[name] = 0
+                        try:
+                            bus.write("Torque_Limit", name, self.NORMAL_TORQUE, normalize=False)
+                        except Exception:
+                            pass
+
+            if self.stalled.get(name):
+                continue
+
+            if cur > self.CURRENT_THRESHOLD and delta < self.POS_EPSILON:
+                self.stall_count[name] = self.stall_count.get(name, 0) + 1
+                if self.stall_count[name] >= self.STALL_LOOPS:
+                    if is_gripper:
+                        # Gripper: reduce to holding torque immediately, no retry
+                        self.stalled[name] = True
+                        self.stall_target[name] = pos
+                        try:
+                            bus.write("Torque_Limit", name, self.GRIP_TORQUE, normalize=False)
+                        except Exception:
+                            pass
+                        print(f"[GRIP] {name} gripping (current={cur}) — holding at reduced torque")
+                    elif not self.retried.get(name):
+                        self.retried[name] = True
+                        self.stall_count[name] = 0
+                        print(f"[STALL] {name} stalled (current={cur}) — retrying once")
+                    else:
+                        self.stalled[name] = True
+                        self.stall_target[name] = pos
+                        try:
+                            bus.write("Torque_Limit", name, self.STALL_TORQUE, normalize=False)
+                        except Exception:
+                            pass
+                        print(f"[STALL] {name} stalled again — torque reduced until target changes")
+            else:
+                self.stall_count[name] = 0
+                self.retried[name] = False
+
+
 # Ender 3 config
 ENDER3_PORT = "COM9"
 ENDER3_BAUD = 115200
@@ -567,22 +651,114 @@ def main():
     # robot_config = XLerobot2WheelsClientConfig(remote_ip=ip, id=robot_name)
     # robot = XLerobot2WheelsClient(robot_config)    
 
+    # Choose which buses to use
+    print("\nWhich buses to enable?")
+    print("  1 = Bus1 only (left arm + head)")
+    print("  2 = Bus2 only (right arm + wheels)")
+    print("  3 = Both buses")
+    bus_choice = input("Enter choice [2]: ").strip() or "2"
+    use_bus1 = bus_choice in ("1", "3")
+    use_bus2 = bus_choice in ("2", "3")
+
+    # Ender 3
+    ender3_choice = input("Enable Ender 3 Z-axis? [y/N]: ").strip().lower()
+    use_ender3 = ender3_choice == "y"
+
     # For local/wired connection
     robot_config = XLerobot2WheelsConfig(id=robot_name)
     robot = XLerobot2Wheels(robot_config)
-    
+
+    # Connect only the selected buses manually instead of robot.connect()
     try:
-        robot.connect()
-        print(f"[MAIN] Successfully connected to robot")
+        if use_bus1:
+            robot.bus1.connect()
+            robot.bus1.configure_motors(return_delay_time=20)
+        if use_bus2:
+            robot.bus2.connect()
+            robot.bus2.configure_motors(return_delay_time=20)
+
+        # Load calibration
+        import json
+        from pathlib import Path
+        from lerobot.motors import MotorCalibration
+        calib_path = Path.home() / ".cache/huggingface/lerobot/calibration/robots/xlerobot_2wheels/my_xlerobot_2wheels_lab.json"
+        if calib_path.is_file():
+            with open(calib_path) as f:
+                calib_data = json.load(f)
+            if use_bus1:
+                bus1_cal = {}
+                for name in robot.bus1.motors:
+                    if name in calib_data:
+                        c = calib_data[name]
+                        bus1_cal[name] = MotorCalibration(id=c["id"], drive_mode=c["drive_mode"],
+                            homing_offset=c["homing_offset"], range_min=c["range_min"], range_max=c["range_max"])
+                robot.bus1.calibration = bus1_cal
+                robot.bus1.write_calibration(bus1_cal)
+            if use_bus2:
+                bus2_cal = {}
+                for name in robot.bus2.motors:
+                    if name in calib_data:
+                        c = calib_data[name]
+                        bus2_cal[name] = MotorCalibration(id=c["id"], drive_mode=c["drive_mode"],
+                            homing_offset=c["homing_offset"], range_min=c["range_min"], range_max=c["range_max"])
+                robot.bus2.calibration = bus2_cal
+                robot.bus2.write_calibration(bus2_cal)
+            print("[MAIN] Calibration loaded")
+
+        # Configure only active buses
+        import time as _time2
+        if use_bus1:
+            robot.bus1.disable_torque()
+            for name in robot.left_arm_motors:
+                robot.bus1.write("Operating_Mode", name, 0)
+                robot.bus1.write("P_Coefficient", name, 16)
+                robot.bus1.write("I_Coefficient", name, 0)
+                robot.bus1.write("D_Coefficient", name, 43)
+                robot.bus1.write("Torque_Limit", name, 600)
+            for name in robot.head_motors:
+                robot.bus1.write("Operating_Mode", name, 0)
+                robot.bus1.write("P_Coefficient", name, 16)
+                robot.bus1.write("I_Coefficient", name, 0)
+                robot.bus1.write("D_Coefficient", name, 43)
+                robot.bus1.write("Torque_Limit", name, 600)
+            for name in robot.left_arm_motors + robot.head_motors:
+                try:
+                    pos = robot.bus1.sync_read("Present_Position", [name], normalize=False)
+                    robot.bus1.write("Goal_Position", name, pos[name], normalize=False)
+                    robot.bus1.write("Torque_Enable", name, 1)
+                except Exception:
+                    print(f"[WARN] Failed to enable {name}")
+                _time2.sleep(0.05)
+
+        if use_bus2:
+            robot.bus2.disable_torque()
+            for name in robot.right_arm_motors:
+                robot.bus2.write("Operating_Mode", name, 0)
+                robot.bus2.write("P_Coefficient", name, 16)
+                robot.bus2.write("I_Coefficient", name, 0)
+                robot.bus2.write("D_Coefficient", name, 43)
+                robot.bus2.write("Torque_Limit", name, 600)
+            for name in robot.base_motors:
+                robot.bus2.write("Operating_Mode", name, 1)
+            for name in robot.right_arm_motors + robot.base_motors:
+                try:
+                    pos = robot.bus2.sync_read("Present_Position", [name], normalize=False)
+                    robot.bus2.write("Goal_Position", name, pos[name], normalize=False)
+                    robot.bus2.write("Torque_Enable", name, 1)
+                except Exception:
+                    print(f"[WARN] Failed to enable {name}")
+                _time2.sleep(0.05)
+
+        print(f"[MAIN] Connected — Bus1={'ON' if use_bus1 else 'OFF'} Bus2={'ON' if use_bus2 else 'OFF'}")
     except Exception as e:
-        print(f"[MAIN] Failed to connect to robot: {e}")
-        print(robot_config)
-        print(robot)
+        print(f"[MAIN] Failed to connect: {e}")
+        import traceback; traceback.print_exc()
         return
 
     # Connect Ender 3
     ender3 = Ender3Controller()
-    ender3.connect()
+    if use_ender3:
+        ender3.connect()
 
     init_rerun(session_name="xlerobot_2wheels_teleop")
 
@@ -602,17 +778,46 @@ def main():
     arrow_listener = pynput_keyboard.Listener(on_press=on_arrow_press, on_release=on_arrow_release)
     arrow_listener.start()
 
-    # Init the arm and head instances
-    obs = robot.get_observation()
+    # Init arm and head instances based on bus selection
+    # Build a partial obs from the active buses
+    obs = {}
+    if use_bus1:
+        try:
+            left_pos = robot.bus1.sync_read("Present_Position", robot.left_arm_motors, num_retry=5)
+            obs.update({f"{k}.pos": v for k, v in left_pos.items()})
+            head_pos = robot.bus1.sync_read("Present_Position", robot.head_motors, num_retry=5)
+            obs.update({f"{k}.pos": v for k, v in head_pos.items()})
+        except Exception as e:
+            print(f"[WARN] Bus1 read failed: {e}")
+            use_bus1 = False
+    if use_bus2:
+        right_pos = robot.bus2.sync_read("Present_Position", robot.right_arm_motors, num_retry=5)
+        obs.update({f"{k}.pos": v for k, v in right_pos.items()})
+        wheel_vel = robot.bus2.sync_read("Present_Velocity", robot.base_motors, num_retry=5)
+        obs.update(robot._wheel_raw_to_body(wheel_vel["base_left_wheel"], wheel_vel["base_right_wheel"]))
+
+    # Fill missing obs with zeros for disabled bus
+    for prefix in ["left_arm", "right_arm"]:
+        for joint in ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]:
+            key = f"{prefix}_{joint}.pos"
+            if key not in obs:
+                obs[key] = 0.0
+    for h in ["head_motor_1.pos", "head_motor_2.pos"]:
+        if h not in obs:
+            obs[h] = 0.0
+
     kin_left = SO101Kinematics()
     kin_right = SO101Kinematics()
     left_arm = SimpleTeleopArm(kin_left, LEFT_JOINT_MAP, obs, prefix="left")
     right_arm = SimpleTeleopArm(kin_right, RIGHT_JOINT_MAP, obs, prefix="right")
     head_control = SimpleHeadControl(obs)
 
-    # Move both arms and head to zero position at start
-    left_arm.move_to_zero_position(robot)
-    right_arm.move_to_zero_position(robot)
+    if use_bus1:
+        left_arm.move_to_zero_position(robot, obs=obs, bus=robot.bus1)
+    if use_bus2:
+        right_arm.move_to_zero_position(robot, obs=obs, bus=robot.bus2)
+
+    print(f"\nActive: Bus1={'ON' if use_bus1 else 'OFF'} Bus2={'ON' if use_bus2 else 'OFF'} Ender3={'ON' if use_ender3 else 'OFF'}")
 
     # Print comprehensive keymap information based on robot config
     print("\n" + "="*80)
@@ -678,6 +883,7 @@ def main():
 
     error_count = 0
     loop_count = 0
+    stall_detector = StallDetector()
     try:
         while True:
           try:
@@ -723,27 +929,57 @@ def main():
             if pynput_keyboard.Key.left in arrow_keys_pressed:
                 ender3.handle_key("y_back", ender3.move_y, -ENDER3_Y_STEP)
 
-            left_arm.handle_keys(left_key_state)
-            right_arm.handle_keys(right_key_state)
-            head_control.handle_keys(left_key_state)  # Head controlled by left arm keymap
+            if use_bus1:
+                left_arm.handle_keys(left_key_state)
+                head_control.handle_keys(left_key_state)
+            if use_bus2:
+                right_arm.handle_keys(right_key_state)
 
-            obs = robot.get_observation()
+            obs = {}
 
-            left_action = left_arm.p_control_action(robot, obs)
-            right_action = right_arm.p_control_action(robot, obs)
-            head_action = head_control.p_control_action(robot, obs)
+            # Bus1: left arm + head
+            if use_bus1:
+                try:
+                    left_pos = robot.bus1.sync_read("Present_Position", robot.left_arm_motors, num_retry=1)
+                    obs.update({f"{k}.pos": v for k, v in left_pos.items()})
+                    head_pos = robot.bus1.sync_read("Present_Position", robot.head_motors, num_retry=1)
+                    obs.update({f"{k}.pos": v for k, v in head_pos.items()})
+                except (ConnectionError, RuntimeError, OSError):
+                    error_count += 1
 
-            # Get smooth base action with linear acceleration/deceleration
-            base_action = smooth_controller.update(pressed_keys, robot)
+            # Bus2: right arm + wheels
+            if use_bus2:
+                right_pos = robot.bus2.sync_read("Present_Position", robot.right_arm_motors)
+                obs.update({f"{k}.pos": v for k, v in right_pos.items()})
+                wheel_vel = robot.bus2.sync_read("Present_Velocity", robot.base_motors)
+                obs.update(robot._wheel_raw_to_body(wheel_vel["base_left_wheel"], wheel_vel["base_right_wheel"]))
 
-            action = {**left_action, **right_action, **head_action, **base_action}
-            robot.send_action(action)
+            # Actions + writes for active buses
+            if use_bus1 and any("left" in k for k in obs):
+                left_action = left_arm.p_control_action(robot, obs)
+                head_action = head_control.p_control_action(robot, obs)
+                try:
+                    for name, val in {k.replace(".pos", ""): v for k, v in left_action.items()}.items():
+                        robot.bus1.write("Goal_Position", name, val, num_retry=1)
+                    for name, val in {k.replace(".pos", ""): v for k, v in head_action.items()}.items():
+                        robot.bus1.write("Goal_Position", name, val, num_retry=1)
+                    stall_detector.update(robot.bus1, robot.left_arm_motors)
+                except (ConnectionError, RuntimeError, OSError):
+                    pass
 
-            log_rerun_data(obs, action)
+            if use_bus2:
+                right_action = right_arm.p_control_action(robot, obs)
+                base_action = smooth_controller.update(pressed_keys, robot)
+                for name, val in {k.replace(".pos", ""): v for k, v in right_action.items()}.items():
+                    robot.bus2.write("Goal_Position", name, val)
+                base_raw = robot._body_to_wheel_raw(base_action.get("x.vel", 0), base_action.get("theta.vel", 0))
+                robot.bus2.sync_write("Goal_Velocity", base_raw)
+                right_targets = {k.replace(".pos", ""): v for k, v in right_action.items()}
+                stall_detector.update(robot.bus2, robot.right_arm_motors, right_targets)
+
             time.sleep(1.0 / FPS)
           except (ConnectionError, RuntimeError, OSError) as e:
             error_count += 1
-            print(f"[WARN] Comms error #{error_count} (loop {loop_count}): {e}")
             time.sleep(0.5)
     finally:
         robot.disconnect()
