@@ -1,49 +1,84 @@
-"""Set a new motor's ID. Connect ONLY the new motor to the bus (unplug all others)."""
+"""Set a new STS3215 motor's ID. No heavy imports — fast startup.
+Connect ONLY the new motor to the bus (unplug all others)."""
 import time
-from lerobot.motors.feetech import FeetechMotorsBus
-from lerobot.motors import Motor, MotorNormMode
+import serial
 
-TARGET_ID = 6
-PORT = "COM6"
+print("=== Set Motor ID (STS3215) ===\n")
+PORT = input("Which port? (COM5/COM6) [COM5]: ").strip() or "COM5"
+if PORT.isdigit():
+    PORT = f"COM{PORT}"
 
-# New motor defaults to ID 1
-motors = {"new_motor": Motor(1, "sts3215", MotorNormMode.RANGE_0_100)}
+HEADER = bytes([0xFF, 0xFF])
 
-print(f"=== Set motor ID to {TARGET_ID} on {PORT} ===")
-print("Make sure ONLY the new motor is connected!")
-input("Press ENTER when ready...")
+def checksum(packet):
+    return (~sum(packet) & 0xFF)
 
-bus = FeetechMotorsBus(port=PORT, motors=motors)
-bus.connect()
+def read_register(ser, motor_id, addr, length=1):
+    ser.reset_input_buffer()
+    pkt = [motor_id, 4, 0x02, addr, length]
+    pkt.append(checksum(pkt))
+    ser.write(HEADER + bytes(pkt))
+    time.sleep(0.02)
+    resp = ser.read(ser.in_waiting)
+    if len(resp) >= 6 + length:
+        if length == 1:
+            return resp[5]
+        else:
+            return resp[5] | (resp[6] << 8)
+    return None
 
-# Read current ID to confirm connection
-try:
-    pos = bus.sync_read("Present_Position", ["new_motor"], normalize=False)
-    print(f"  Motor found at ID 1, position: {pos['new_motor']}")
-except Exception as e:
-    print(f"  Can't find motor at ID 1: {e}")
-    print("  Is the motor plugged in? Is it the only one on the bus?")
-    bus.port_handler.closePort()
+def write_register(ser, motor_id, addr, value, length=1):
+    if length == 1:
+        data = [value & 0xFF]
+    else:
+        data = [value & 0xFF, (value >> 8) & 0xFF]
+    params = [addr] + data
+    pkt = [motor_id, len(params) + 2, 0x03] + params
+    pkt.append(checksum(pkt))
+    ser.write(HEADER + bytes(pkt))
+    time.sleep(0.05)
+    return ser.read(ser.in_waiting)
+
+ser = serial.Serial(PORT, 1000000, timeout=0.1)
+time.sleep(0.1)
+
+# Scan IDs 1-16
+print(f"Scanning {PORT} for motors (ID 1-16)...")
+found = []
+for test_id in range(1, 17):
+    pos = read_register(ser, test_id, 56, 2)
+    if pos is not None:
+        print(f"  ID {test_id}: FOUND (position: {pos})")
+        found.append(test_id)
+
+if not found:
+    print("\n  No motors found! Check cable and power.")
+    ser.close()
     exit()
 
-# Write new ID
-print(f"\n  Writing ID = {TARGET_ID}...")
-bus.write("Lock", "new_motor", 0)  # Unlock EEPROM
-bus.write("ID", "new_motor", TARGET_ID, normalize=False)
+if len(found) > 1:
+    print(f"\n  WARNING: Multiple motors found ({found}). Only ONE motor should be connected!")
+    print("  Unplug all others first.")
+    ser.close()
+    exit()
+
+current_id = found[0]
+print(f"\nMotor found at ID {current_id}")
+TARGET_ID = int(input(f"Set to which ID? (1-10): ").strip())
+
+print(f"\n  Unlocking EEPROM...")
+write_register(ser, current_id, 55, 0)
+
+print(f"  Writing ID = {TARGET_ID}...")
+write_register(ser, current_id, 5, TARGET_ID)
 time.sleep(0.5)
 
-# Verify — reconnect with new ID
-bus.port_handler.closePort()
-motors2 = {"gripper": Motor(TARGET_ID, "sts3215", MotorNormMode.RANGE_0_100)}
-bus2 = FeetechMotorsBus(port=PORT, motors=motors2)
-bus2.connect()
+print(f"  Verifying...")
+pos = read_register(ser, TARGET_ID, 56, 2)
+if pos is not None:
+    print(f"  Motor responding at ID {TARGET_ID}, position: {pos}")
+    print(f"\n  SUCCESS! ID changed from {current_id} to {TARGET_ID}.")
+else:
+    print(f"  FAILED — no response at ID {TARGET_ID}")
 
-try:
-    pos = bus2.sync_read("Present_Position", ["gripper"], normalize=False)
-    print(f"  Motor responding at ID {TARGET_ID}, position: {pos['gripper']}")
-    print(f"\n  SUCCESS! Motor ID set to {TARGET_ID}.")
-    print("  Now reconnect the full daisy chain and run test_motor6.py")
-except Exception as e:
-    print(f"  FAILED to read at ID {TARGET_ID}: {e}")
-
-bus2.port_handler.closePort()
+ser.close()
