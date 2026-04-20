@@ -1,4 +1,5 @@
-"""Spin motor ID 1 continuously with overload protection.
+"""Spin a single motor continuously with overload protection.
+Prompts for port + motor ID at startup.
 R = reverse, Q = quit. Monitors current and auto-stops on stall."""
 import time
 import serial
@@ -19,7 +20,8 @@ elif choice.isdigit():
 else:
     PORT = choice
 
-MOTOR_ID = 1
+mid_input = input("Which motor ID? [1]: ").strip()
+MOTOR_ID = int(mid_input) if mid_input else 1
 SPEED = 5000  # 0-32767 range
 HEADER = bytes([0xFF, 0xFF])
 CURRENT_THRESHOLD = 40   # stall detection threshold

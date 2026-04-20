@@ -859,7 +859,7 @@ def main():
                         robot.bus1.write("Goal_Position", name, val, num_retry=1)
                     for name, val in {k.replace(".pos", ""): v for k, v in head_action.items()}.items():
                         robot.bus1.write("Goal_Position", name, val, num_retry=1)
-                    stall_detector.update(robot.bus1, robot.left_arm_motors)
+                    stall_detector.update(robot.bus1, robot.left_arm_motors + robot.head_motors)
                 except (ConnectionError, RuntimeError, OSError):
                     pass
 
