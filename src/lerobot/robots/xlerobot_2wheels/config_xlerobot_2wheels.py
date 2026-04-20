@@ -19,6 +19,7 @@ from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 from lerobot.cameras.realsense import RealSenseCamera, RealSenseCameraConfig
 
 from ..config import RobotConfig
+from ._ports import get_bus1_port, get_bus2_port
 
 
 def xlerobot_2wheels_cameras_config() -> dict[str, CameraConfig]:
@@ -51,8 +52,8 @@ def xlerobot_2wheels_cameras_config() -> dict[str, CameraConfig]:
 @dataclass
 class XLerobot2WheelsConfig(RobotConfig):
     
-    port1: str = "COM5"  # port to connect to the bus (so101 + head camera)
-    port2: str = "COM6"  # port to connect to the bus (arms + 2 wheels)
+    port1: str = field(default_factory=get_bus1_port)  # bus1: left arm + head (IDs 1-8)
+    port2: str = field(default_factory=get_bus2_port)  # bus2: right arm + wheels + z-lift (IDs 1-6, 9-11)
     disable_torque_on_disconnect: bool = True
 
     # `max_relative_target` limits the magnitude of the relative positional target vector for safety purposes.

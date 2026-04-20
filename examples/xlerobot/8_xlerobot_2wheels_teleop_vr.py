@@ -8,7 +8,6 @@ Uses handle_vr_input with delta action control
 import asyncio
 import logging
 import math
-import serial
 import sys
 import threading
 import time
@@ -74,91 +73,6 @@ JOINT_LIMITS = {
     'wrist_roll': (-90, 90),
     'gripper': (0, 45),
 }
-
-# ─── Ender 3 motion platform config ──────────────────────────────────────────
-ENDER3_PORT = "COM9"
-ENDER3_BAUD = 115200
-ENDER3_Z_STEP = 10    # mm per button press
-ENDER3_Y_STEP = 50    # mm per button press
-ENDER3_Z_FEED = 300   # mm/min (slow for Z)
-ENDER3_Y_FEED = 3000  # mm/min
-
-
-class Ender3Controller:
-    """Controls Ender 3 Z-lift and Y-bed via G-code over serial."""
-
-    def __init__(self, port=ENDER3_PORT, baud=ENDER3_BAUD):
-        self.port_name = port
-        self.baud = baud
-        self.ser = None
-        self._lock = threading.Lock()
-        self._last_button_time = {}  # debounce tracking
-        self._moving = False
-
-    def connect(self):
-        try:
-            self.ser = serial.Serial(self.port_name, self.baud, timeout=2)
-            time.sleep(2)  # wait for Marlin to boot
-            self._drain()
-            print(f"[ENDER3] Connected on {self.port_name}")
-            self.send("G92 X0")       # suppress missing X axis
-            self.send("M84 S0")       # disable stepper idle timeout (keep energized)
-            self.send("G28 Y")        # home bed
-            self.send("G28 Z")        # home lift
-            self.send("G91")          # relative positioning mode
-            print("[ENDER3] Homed and ready (relative mode)")
-        except Exception as e:
-            print(f"[ENDER3] Failed to connect: {e}")
-            self.ser = None
-
-    def send(self, cmd):
-        if not self.ser:
-            return
-        with self._lock:
-            self.ser.write(f"{cmd}\n".encode())
-            time.sleep(0.2)
-            self._drain()
-
-    def _drain(self):
-        while self.ser and self.ser.in_waiting:
-            line = self.ser.readline().decode(errors='ignore').strip()
-            if line:
-                print(f"[ENDER3] {line}")
-
-    def move_z(self, delta_mm):
-        print(f"[ENDER3] Z {'up' if delta_mm > 0 else 'down'} {abs(delta_mm)}mm")
-        self.send(f"G1 Z{delta_mm} F{ENDER3_Z_FEED}")
-
-    def move_y(self, delta_mm):
-        print(f"[ENDER3] Bed {'forward' if delta_mm > 0 else 'backward'} {abs(delta_mm)}mm")
-        self.send(f"G1 Y{delta_mm} F{ENDER3_Y_FEED}")
-
-    def emergency_stop(self):
-        if self.ser:
-            print("[ENDER3] EMERGENCY STOP")
-            self.ser.write(b"M112\n")
-
-    def disconnect(self):
-        if self.ser:
-            self.ser.close()
-            self.ser = None
-            print("[ENDER3] Disconnected")
-
-    def is_moving(self):
-        """Check if Ender 3 is currently executing a move."""
-        return self._moving
-
-    def handle_button(self, button_name, action_fn, *args, debounce_ms=600):
-        """Call action_fn if button hasn't been pressed within debounce window."""
-        now = time.time()
-        last = self._last_button_time.get(button_name, 0)
-        if (now - last) * 1000 > debounce_ms:
-            self._last_button_time[button_name] = now
-            self._moving = True
-            action_fn(*args)
-            time.sleep(0.5)  # pause to let power settle before arms resume
-            self._moving = False
-
 
 class SimpleTeleopArm:
     """
@@ -656,8 +570,6 @@ def main():
         bus_choice = input("Enter choice [2]: ").strip() or "2"
         use_bus1 = bus_choice in ("1", "3")
         use_bus2 = bus_choice in ("2", "3")
-        ender3_choice = input("Enable Ender 3 Z-axis? [y/N]: ").strip().lower()
-        use_ender3 = ender3_choice == "y"
 
         robot_config = XLerobot2WheelsConfig(id="my_xlerobot_2wheels_lab")
         robot = XLerobot2Wheels(robot_config)
@@ -793,17 +705,10 @@ def main():
                     pass
             print("[OK] right arm at zero")
 
-        # Ender 3
-        ender3 = Ender3Controller()
-        if use_ender3:
-            print("Initializing Ender 3...")
-            ender3.connect()
-
         # Main VR control loop — crash-proof with diagnostics
         print("Starting VR control loop. Press ESC to exit.")
         loop_count = 0
         error_count = 0
-        ender3_moves = 0
         stall_detector = StallDetector()
         status_time = time.time()
         running = True
@@ -818,11 +723,6 @@ def main():
 
                     # Wait for VR connection before proceeding
                     if dual_goals is None:
-                        time.sleep(0.01)
-                        continue
-
-                    # Skip arm updates while Ender 3 is moving
-                    if ender3.ser and ender3.is_moving():
                         time.sleep(0.01)
                         continue
 
@@ -848,30 +748,6 @@ def main():
                     loop_count += 1
                     time.sleep(0.02)
 
-                    # ─── Ender 3 button controls ─────────────────────
-                    if ender3.ser:
-                        right_buttons = {}
-                        left_buttons = {}
-                        if right_goal and hasattr(right_goal, 'metadata') and right_goal.metadata:
-                            right_buttons = right_goal.metadata.get('buttons', {}) if isinstance(right_goal.metadata, dict) else {}
-                        if left_goal and hasattr(left_goal, 'metadata') and left_goal.metadata:
-                            left_buttons = left_goal.metadata.get('buttons', {}) if isinstance(left_goal.metadata, dict) else {}
-
-                        # Z-axis: Right B = up, Left Y(b) = down
-                        if right_buttons.get('b'):
-                            ender3.handle_button('z_up', ender3.move_z, ENDER3_Z_STEP)
-                            ender3_moves += 1
-                        if left_buttons.get('b'):
-                            ender3.handle_button('z_down', ender3.move_z, -ENDER3_Z_STEP)
-                            ender3_moves += 1
-                        # Y-axis (bed): Right A = forward, Left X(a) = backward
-                        if right_buttons.get('a'):
-                            ender3.handle_button('y_fwd', ender3.move_y, ENDER3_Y_STEP)
-                            ender3_moves += 1
-                        if left_buttons.get('a'):
-                            ender3.handle_button('y_back', ender3.move_y, -ENDER3_Y_STEP)
-                            ender3_moves += 1
-
                 except (ConnectionError, RuntimeError, OSError, DeviceNotConnectedError) as e:
                     error_count += 1
                     if error_count <= 5 or error_count % 50 == 0:
@@ -886,10 +762,9 @@ def main():
                     total = loop_count + error_count
                     err_pct = (error_count / total * 100) if total > 0 else 0
                     vr_ok = "connected" if (left_goal or right_goal) else "waiting"
-                    print(f"[STATUS {int(now - status_time)}s] Loops: {loop_count} | Errors: {error_count} ({err_pct:.1f}%) | Ender3: {ender3_moves} moves | VR: {vr_ok}")
+                    print(f"[STATUS {int(now - status_time)}s] Loops: {loop_count} | Errors: {error_count} ({err_pct:.1f}%) | VR: {vr_ok}")
                     loop_count = 0
                     error_count = 0
-                    ender3_moves = 0
                     status_time = now
 
                 # Handle keyboard exit (press ESC to quit)
@@ -912,10 +787,6 @@ def main():
         
     finally:
         # Cleanup
-        try:
-            ender3.disconnect()
-        except:
-            pass
         try:
             pygame.quit()
         except:

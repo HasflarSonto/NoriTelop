@@ -2,6 +2,7 @@
 import time
 from lerobot.motors.feetech import FeetechMotorsBus
 from lerobot.motors import Motor, MotorCalibration, MotorNormMode
+from lerobot.robots.xlerobot_2wheels._ports import get_bus1_port
 import json
 from pathlib import Path
 
@@ -21,7 +22,7 @@ arm1 = [n for n in bus1_motors if "arm" in n]
 
 print("=== TEST: MOTOR 3 (elbow_flex) WITH REDUCED TORQUE ===\n")
 
-bus1 = FeetechMotorsBus(port="COM5", motors=bus1_motors)
+bus1 = FeetechMotorsBus(port=get_bus1_port(), motors=bus1_motors)
 bus1.connect()
 bus1.configure_motors(return_delay_time=20)
 

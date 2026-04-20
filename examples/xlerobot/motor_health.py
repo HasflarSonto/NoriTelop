@@ -1,12 +1,13 @@
 """Motor Health Check — tests each motor individually to find damaged ones.
 Usage:
-    python motor_health.py COM5    (test bus1: left arm + head)
-    python motor_health.py COM6    (test bus2: right arm + wheels)
+    python motor_health.py 1   (test bus1: left arm + head)
+    python motor_health.py 2   (test bus2: right arm + wheels + z-lift)
 """
 import sys
 import time
 from lerobot.motors.feetech import FeetechMotorsBus
 from lerobot.motors import Motor, MotorNormMode
+from lerobot.robots.xlerobot_2wheels._ports import get_bus1_port, get_bus2_port
 
 nm = MotorNormMode.DEGREES
 
@@ -28,18 +29,24 @@ BUS2_MOTORS = {
     "right_arm_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
     "base_left_wheel": Motor(9, "sts3215", nm),
     "base_right_wheel": Motor(10, "sts3215", nm),
+    "z_lift": Motor(11, "sts3215", nm),
 }
 
-port = sys.argv[1] if len(sys.argv) > 1 else None
-if port not in ("COM5", "COM6"):
-    print("Usage: python motor_health.py [COM5|COM6]")
+bus_arg = sys.argv[1] if len(sys.argv) > 1 else None
+if bus_arg not in ("1", "2"):
+    print("Usage: python motor_health.py [1|2]")
     sys.exit(1)
 
-motors = BUS1_MOTORS if port == "COM5" else BUS2_MOTORS
+if bus_arg == "1":
+    motors = BUS1_MOTORS
+    port = get_bus1_port()
+else:
+    motors = BUS2_MOTORS
+    port = get_bus2_port()
 arm_motors = [n for n in motors if "arm" in n]
 skip_motors = ["head_motor_1", "head_motor_2"]
 
-print(f"=== Motor Health Check — {port} ===\n")
+print(f"=== Motor Health Check — bus{bus_arg} ({port}) ===\n")
 
 bus = FeetechMotorsBus(port=port, motors=motors)
 bus.connect()

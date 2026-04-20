@@ -2,11 +2,21 @@
 Connect ONLY the new motor to the bus (unplug all others)."""
 import time
 import serial
+from lerobot.robots.xlerobot_2wheels._ports import get_bus1_port, get_bus2_port
 
 print("=== Set Motor ID (STS3215) ===\n")
-PORT = input("Which port? (COM5/COM6) [COM5]: ").strip() or "COM5"
-if PORT.isdigit():
-    PORT = f"COM{PORT}"
+default_port = get_bus1_port()
+choice = input(f"Which port? (1=bus1, 2=bus2, or explicit port/URL) [{default_port}]: ").strip()
+if not choice:
+    PORT = default_port
+elif choice == "1":
+    PORT = get_bus1_port()
+elif choice == "2":
+    PORT = get_bus2_port()
+elif choice.isdigit():
+    PORT = f"COM{choice}"
+else:
+    PORT = choice
 
 HEADER = bytes([0xFF, 0xFF])
 
@@ -39,7 +49,7 @@ def write_register(ser, motor_id, addr, value, length=1):
     time.sleep(0.05)
     return ser.read(ser.in_waiting)
 
-ser = serial.Serial(PORT, 1000000, timeout=0.1)
+ser = serial.serial_for_url(PORT, baudrate=1000000, timeout=0.1)
 time.sleep(0.1)
 
 # Scan IDs 1-16

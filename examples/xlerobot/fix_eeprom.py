@@ -1,6 +1,7 @@
 """Set firmware protection on ALL motors — run once after motor swap."""
 from lerobot.motors.feetech import FeetechMotorsBus
 from lerobot.motors import Motor, MotorNormMode
+from lerobot.robots.xlerobot_2wheels._ports import get_bus1_port, get_bus2_port
 
 nm = MotorNormMode.DEGREES
 bus1_motors = {
@@ -22,6 +23,7 @@ bus2_motors = {
     "right_arm_gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
     "base_left_wheel": Motor(9, "sts3215", nm),
     "base_right_wheel": Motor(10, "sts3215", nm),
+    "z_lift": Motor(11, "sts3215", nm),
 }
 
 EEPROM_SETTINGS = {
@@ -31,8 +33,8 @@ EEPROM_SETTINGS = {
     "Max_Torque_Limit": 2047,             # full torque in EEPROM (software handles limiting)
 }
 
-for label, port, motors in [("BUS1 (COM5)", "COM5", bus1_motors),
-                              ("BUS2 (COM6)", "COM6", bus2_motors)]:
+for label, port, motors in [("BUS1", get_bus1_port(), bus1_motors),
+                              ("BUS2", get_bus2_port(), bus2_motors)]:
     print(f"\n=== {label} ===")
     bus = FeetechMotorsBus(port=port, motors=motors)
     bus.connect()

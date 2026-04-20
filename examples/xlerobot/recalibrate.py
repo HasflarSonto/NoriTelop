@@ -7,6 +7,7 @@ import sys
 import json
 from pathlib import Path
 from lerobot.robots.xlerobot_2wheels import XLerobot2WheelsConfig, XLerobot2Wheels
+from lerobot.robots.xlerobot_2wheels._ports import get_bus1_port, get_bus2_port
 from lerobot.motors import MotorCalibration
 from lerobot.motors.feetech import OperatingMode
 
@@ -24,12 +25,12 @@ if side == "right":
     bus = robot.bus2
     arm_motors = robot.right_arm_motors
     extra_motors = robot.base_motors
-    port = "COM6"
+    port = get_bus2_port()
 elif side == "left":
     bus = robot.bus1
     arm_motors = robot.left_arm_motors
     extra_motors = robot.head_motors
-    port = "COM5"
+    port = get_bus1_port()
 
 print(f"=== Recalibrating {side} arm on {port} ===\n")
 print(f"Arm motors: {arm_motors}")

@@ -11,9 +11,6 @@ PYTHONPATH=src python -m examples.xlerobot_2wheels.teleoperate_Keyboard
 import time
 import numpy as np
 import math
-import serial
-import threading
-from pynput import keyboard as pynput_keyboard
 
 from lerobot.robots.xlerobot_2wheels import XLerobot2WheelsClient, XLerobot2WheelsClientConfig, XLerobot2WheelsConfig, XLerobot2Wheels
 # from lerobot.utils.robot_utils import busy_wait
@@ -568,77 +565,6 @@ class StallDetector:
                 self.retried[name] = False
 
 
-# Ender 3 config
-ENDER3_PORT = "COM9"
-ENDER3_BAUD = 115200
-ENDER3_Z_STEP = 10    # mm per key press
-ENDER3_Y_STEP = 10    # mm per key press
-ENDER3_Z_FEED = 300   # mm/min
-ENDER3_Y_FEED = 3000  # mm/min
-
-
-class Ender3Controller:
-    """Controls Ender 3 Z-lift and Y-bed via G-code over serial."""
-
-    def __init__(self, port=ENDER3_PORT, baud=ENDER3_BAUD):
-        self.port_name = port
-        self.baud = baud
-        self.ser = None
-        self._lock = threading.Lock()
-        self._last_button_time = {}
-
-    def connect(self):
-        try:
-            self.ser = serial.Serial(self.port_name, self.baud, timeout=2)
-            time.sleep(2)
-            self._drain()
-            print(f"[ENDER3] Connected on {self.port_name}")
-            self.send("G92 X0")
-            self.send("M84 S0")
-            self.send("G28 Y")
-            self.send("G28 Z")
-            self.send("G91")
-            print("[ENDER3] Homed and ready (relative mode)")
-        except Exception as e:
-            print(f"[ENDER3] Failed to connect: {e}")
-            self.ser = None
-
-    def send(self, cmd):
-        if not self.ser:
-            return
-        with self._lock:
-            self.ser.write(f"{cmd}\n".encode())
-            time.sleep(0.2)
-            self._drain()
-
-    def _drain(self):
-        while self.ser and self.ser.in_waiting:
-            line = self.ser.readline().decode(errors='ignore').strip()
-            if line:
-                print(f"[ENDER3] {line}")
-
-    def move_z(self, delta_mm):
-        print(f"[ENDER3] Z {'up' if delta_mm > 0 else 'down'} {abs(delta_mm)}mm")
-        self.send(f"G1 Z{delta_mm} F{ENDER3_Z_FEED}")
-
-    def move_y(self, delta_mm):
-        print(f"[ENDER3] Bed {'forward' if delta_mm > 0 else 'backward'} {abs(delta_mm)}mm")
-        self.send(f"G1 Y{delta_mm} F{ENDER3_Y_FEED}")
-
-    def handle_key(self, key_name, action_fn, *args, debounce_ms=400):
-        now = time.time()
-        last = self._last_button_time.get(key_name, 0)
-        if (now - last) * 1000 > debounce_ms:
-            self._last_button_time[key_name] = now
-            action_fn(*args)
-
-    def disconnect(self):
-        if self.ser:
-            self.ser.close()
-            self.ser = None
-            print("[ENDER3] Disconnected")
-
-
 def main():
     # Teleop parameters
     FPS = 50
@@ -659,10 +585,6 @@ def main():
     bus_choice = input("Enter choice [2]: ").strip() or "2"
     use_bus1 = bus_choice in ("1", "3")
     use_bus2 = bus_choice in ("2", "3")
-
-    # Ender 3
-    ender3_choice = input("Enable Ender 3 Z-axis? [y/N]: ").strip().lower()
-    use_ender3 = ender3_choice == "y"
 
     # For local/wired connection
     robot_config = XLerobot2WheelsConfig(id=robot_name)
@@ -755,28 +677,12 @@ def main():
         import traceback; traceback.print_exc()
         return
 
-    # Connect Ender 3
-    ender3 = Ender3Controller()
-    if use_ender3:
-        ender3.connect()
-
     init_rerun(session_name="xlerobot_2wheels_teleop")
 
     #Init the keyboard instance
     keyboard_config = KeyboardTeleopConfig()
     keyboard = KeyboardTeleop(keyboard_config)
     keyboard.connect()
-
-    # Track arrow keys for Ender 3 (pynput special keys)
-    arrow_keys_pressed = set()
-    def on_arrow_press(key):
-        if key in (pynput_keyboard.Key.up, pynput_keyboard.Key.down,
-                   pynput_keyboard.Key.left, pynput_keyboard.Key.right):
-            arrow_keys_pressed.add(key)
-    def on_arrow_release(key):
-        arrow_keys_pressed.discard(key)
-    arrow_listener = pynput_keyboard.Listener(on_press=on_arrow_press, on_release=on_arrow_release)
-    arrow_listener.start()
 
     # Init arm and head instances based on bus selection
     # Build a partial obs from the active buses
@@ -817,7 +723,7 @@ def main():
     if use_bus2:
         right_arm.move_to_zero_position(robot, obs=obs, bus=robot.bus2)
 
-    print(f"\nActive: Bus1={'ON' if use_bus1 else 'OFF'} Bus2={'ON' if use_bus2 else 'OFF'} Ender3={'ON' if use_ender3 else 'OFF'}")
+    print(f"\nActive: Bus1={'ON' if use_bus1 else 'OFF'} Bus2={'ON' if use_bus2 else 'OFF'}")
 
     # Print comprehensive keymap information based on robot config
     print("\n" + "="*80)
@@ -919,16 +825,6 @@ def main():
                 head_control.move_to_zero_position(robot)
                 continue
 
-            # Ender 3 arrow key controls
-            if pynput_keyboard.Key.up in arrow_keys_pressed:
-                ender3.handle_key("z_up", ender3.move_z, ENDER3_Z_STEP)
-            if pynput_keyboard.Key.down in arrow_keys_pressed:
-                ender3.handle_key("z_down", ender3.move_z, -ENDER3_Z_STEP)
-            if pynput_keyboard.Key.right in arrow_keys_pressed:
-                ender3.handle_key("y_fwd", ender3.move_y, ENDER3_Y_STEP)
-            if pynput_keyboard.Key.left in arrow_keys_pressed:
-                ender3.handle_key("y_back", ender3.move_y, -ENDER3_Y_STEP)
-
             if use_bus1:
                 left_arm.handle_keys(left_key_state)
                 head_control.handle_keys(left_key_state)
@@ -984,8 +880,6 @@ def main():
     finally:
         robot.disconnect()
         keyboard.disconnect()
-        ender3.disconnect()
-        arrow_listener.stop()
         print(f"Teleoperation ended. Errors: {error_count}/{loop_count}")
 
 if __name__ == "__main__":

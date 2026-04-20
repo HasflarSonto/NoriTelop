@@ -3,10 +3,21 @@ R = reverse, Q = quit. Monitors current and auto-stops on stall."""
 import time
 import serial
 import threading
+from lerobot.robots.xlerobot_2wheels._ports import get_bus1_port, get_bus2_port
 
-PORT = input("Which port? (COM5/COM6) [COM5]: ").strip() or "COM5"
-if PORT.isdigit():
-    PORT = f"COM{PORT}"
+default_port = get_bus1_port()
+prompt = f"Which port? (1=bus1, 2=bus2, or explicit port/URL) [{default_port}]: "
+choice = input(prompt).strip()
+if not choice:
+    PORT = default_port
+elif choice == "1":
+    PORT = get_bus1_port()
+elif choice == "2":
+    PORT = get_bus2_port()
+elif choice.isdigit():
+    PORT = f"COM{choice}"
+else:
+    PORT = choice
 
 MOTOR_ID = 1
 SPEED = 5000  # 0-32767 range
@@ -47,7 +58,7 @@ def set_velocity(ser, speed):
     raw = magnitude | 0x8000 if speed < 0 else magnitude
     write_reg(ser, MOTOR_ID, 46, raw, 2)
 
-ser = serial.Serial(PORT, 1000000, timeout=0.1)
+ser = serial.serial_for_url(PORT, baudrate=1000000, timeout=0.1)
 time.sleep(0.1)
 
 # Verify motor exists
