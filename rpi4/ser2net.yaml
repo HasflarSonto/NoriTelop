@@ -1,0 +1,30 @@
+%YAML 1.1
+---
+# XLeRobot serial-over-TCP bridge — transparent forwarder for Feetech buses.
+# Laptop connects via pyserial.serial_for_url("socket://<host>:3001" or :3002).
+# Baud 1_000_000 matches the STS3215 bus speed.
+
+define: &banner ""
+define: &bus_opts |-
+  kickolduser: true
+  telnet-brk-on-sync: false
+
+connection: &bus1
+    accepter: tcp,3001
+    enable: on
+    options:
+      kickolduser: true
+      telnet-brk-on-sync: false
+      max-connections: 1
+      banner: *banner
+    connector: serialdev,/dev/xlerobot_bus1,1000000n81,local
+
+connection: &bus2
+    accepter: tcp,3002
+    enable: on
+    options:
+      kickolduser: true
+      telnet-brk-on-sync: false
+      max-connections: 1
+      banner: *banner
+    connector: serialdev,/dev/xlerobot_bus2,1000000n81,local

@@ -1,0 +1,16 @@
+# XLeRobot Feetech bus udev rules — installed at /etc/udev/rules.d/99-xlerobot.rules
+#
+# Pin the two CH343 USB-serial boards to stable symlinks keyed by USB port path
+# (KERNELS). The setup_pi.sh script discovers the correct KERNELS values and
+# rewrites this file; the placeholders below are for reference / manual edit.
+#
+# To identify a device's KERNELS manually:
+#   udevadm info -a -n /dev/ttyUSB0 | grep KERNELS | head -1
+#
+# After editing:
+#   sudo udevadm control --reload
+#   sudo udevadm trigger
+#   ls -l /dev/xlerobot_bus*
+
+SUBSYSTEM=="tty", KERNELS=="__BUS1_KERNELS__", SYMLINK+="xlerobot_bus1", MODE="0660", GROUP="dialout"
+SUBSYSTEM=="tty", KERNELS=="__BUS2_KERNELS__", SYMLINK+="xlerobot_bus2", MODE="0660", GROUP="dialout"
