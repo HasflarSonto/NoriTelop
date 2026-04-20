@@ -491,7 +491,8 @@ class StallDetector:
     - Other joints: retry once, then reduce to STALL_TORQUE until target changes."""
 
     CURRENT_THRESHOLD = 30
-    POS_EPSILON = 5
+    POS_EPSILON = 0.25       # normalized units (~5 raw counts on RANGE_M100_100)
+    TARGET_CHANGE = 0.5      # normalized units (~10 raw counts)
     STALL_LOOPS = 15
     NORMAL_TORQUE = 600
     STALL_TORQUE = 100
@@ -504,9 +505,10 @@ class StallDetector:
         self.retried = {}
         self.stall_target = {}
 
-    def update(self, bus, motor_names, current_targets=None):
+    def update(self, bus, motor_names, current_targets=None, positions=None):
         try:
-            positions = bus.sync_read("Present_Position", motor_names, normalize=False)
+            if positions is None:
+                positions = bus.sync_read("Present_Position", motor_names)
             currents = bus.sync_read("Present_Current", motor_names, normalize=False)
         except Exception:
             return
@@ -524,7 +526,7 @@ class StallDetector:
                 new_target = current_targets.get(name)
                 old_target = self.stall_target.get(name)
                 if new_target is not None and old_target is not None:
-                    if abs(new_target - old_target) > 10:
+                    if abs(new_target - old_target) > self.TARGET_CHANGE:
                         self.stalled[name] = False
                         self.retried[name] = False
                         self.stall_count[name] = 0
@@ -790,6 +792,13 @@ def main():
     error_count = 0
     loop_count = 0
     stall_detector = StallDetector()
+
+    # Bridge mode: batch Goal_Position updates via sync_write (1 packet instead
+    # of 6-8 individual write+status round trips per bus per frame). On direct
+    # CH343 USB this caused bus death (see CLAUDE.md §3), so keep individual
+    # writes for local COM.
+    bus1_is_bridge = str(robot.config.port1).startswith("socket://")
+    bus2_is_bridge = str(robot.config.port2).startswith("socket://")
     try:
         while True:
           try:
@@ -855,23 +864,35 @@ def main():
                 left_action = left_arm.p_control_action(robot, obs)
                 head_action = head_control.p_control_action(robot, obs)
                 try:
-                    for name, val in {k.replace(".pos", ""): v for k, v in left_action.items()}.items():
-                        robot.bus1.write("Goal_Position", name, val, num_retry=1)
-                    for name, val in {k.replace(".pos", ""): v for k, v in head_action.items()}.items():
-                        robot.bus1.write("Goal_Position", name, val, num_retry=1)
-                    stall_detector.update(robot.bus1, robot.left_arm_motors + robot.head_motors)
+                    left_targets = {k.replace(".pos", ""): v for k, v in left_action.items()}
+                    head_targets = {k.replace(".pos", ""): v for k, v in head_action.items()}
+                    if bus1_is_bridge:
+                        robot.bus1.sync_write("Goal_Position", {**left_targets, **head_targets})
+                    else:
+                        for name, val in left_targets.items():
+                            robot.bus1.write("Goal_Position", name, val, num_retry=1)
+                        for name, val in head_targets.items():
+                            robot.bus1.write("Goal_Position", name, val, num_retry=1)
+                    stall_detector.update(
+                        robot.bus1,
+                        robot.left_arm_motors + robot.head_motors,
+                        positions={**left_pos, **head_pos},
+                    )
                 except (ConnectionError, RuntimeError, OSError):
                     pass
 
             if use_bus2:
                 right_action = right_arm.p_control_action(robot, obs)
                 base_action = smooth_controller.update(pressed_keys, robot)
-                for name, val in {k.replace(".pos", ""): v for k, v in right_action.items()}.items():
-                    robot.bus2.write("Goal_Position", name, val)
+                right_targets = {k.replace(".pos", ""): v for k, v in right_action.items()}
+                if bus2_is_bridge:
+                    robot.bus2.sync_write("Goal_Position", right_targets)
+                else:
+                    for name, val in right_targets.items():
+                        robot.bus2.write("Goal_Position", name, val)
                 base_raw = robot._body_to_wheel_raw(base_action.get("x.vel", 0), base_action.get("theta.vel", 0))
                 robot.bus2.sync_write("Goal_Velocity", base_raw)
-                right_targets = {k.replace(".pos", ""): v for k, v in right_action.items()}
-                stall_detector.update(robot.bus2, robot.right_arm_motors, right_targets)
+                stall_detector.update(robot.bus2, robot.right_arm_motors, right_targets, positions=right_pos)
 
             time.sleep(1.0 / FPS)
           except (ConnectionError, RuntimeError, OSError) as e:
