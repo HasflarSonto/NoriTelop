@@ -95,6 +95,21 @@ Z_LIFT_UP_KEY = "y"
 Z_LIFT_DOWN_KEY = "h"
 Z_LIFT_VELOCITY = 4000  # raw ticks/sec; ~60 RPM motor (physical max)
 
+# VR mode (ported from 8_xlerobot_2wheels_teleop_vr.py).
+# Soft joint limits applied in user space after handle_vr_input; the final
+# motor-safety clamp is still _clamp_goal_position at register-write time.
+JOINT_LIMITS = {
+    "shoulder_pan":  (-90, 90),
+    "shoulder_lift": (-90, 90),
+    "elbow_flex":    (-90, 90),
+    "wrist_flex":    (-90, 90),
+    "wrist_roll":    (-90, 90),
+    "gripper":       (0, 45),
+}
+# Right-controller face buttons for Z-lift (per Phase 2.5 plan).
+VR_Z_LIFT_UP_BUTTON = "a"
+VR_Z_LIFT_DOWN_BUTTON = "b"
+
 # Keymaps (mirror laptop script lines 29-51)
 LEFT_KEYMAP = {
     "shoulder_pan+": "q", "shoulder_pan-": "e",
@@ -459,6 +474,108 @@ class SimpleTeleopArm:
         self.current_y = 0.1131
         self.pitch = 0.0
 
+    def handle_vr_input(self, vr_goal) -> None:
+        """VR delta-position control. Ported verbatim from
+        examples/xlerobot/8_xlerobot_2wheels_teleop_vr.py:169-294 (monolith).
+        Stateful: caches prev_vr_pos / prev_wrist_flex / prev_wrist_roll on self."""
+        if vr_goal is None:
+            return
+        if not hasattr(vr_goal, "target_position") or vr_goal.target_position is None:
+            return
+
+        current_vr_pos = vr_goal.target_position  # [x, y, z] in meters
+        if not hasattr(self, "prev_vr_pos"):
+            self.prev_vr_pos = current_vr_pos
+            return  # establish baseline
+
+        vr_x = (current_vr_pos[0] - self.prev_vr_pos[0]) * 220
+        vr_y = (current_vr_pos[1] - self.prev_vr_pos[1]) * 70
+        vr_z = (current_vr_pos[2] - self.prev_vr_pos[2]) * 70
+
+        # Controller reconnect guard — reset baseline and skip.
+        if abs(vr_x) > 50 or abs(vr_y) > 50 or abs(vr_z) > 50:
+            print(f"[{self.prefix}] Large VR jump detected, resetting baseline")
+            self.prev_vr_pos = current_vr_pos
+            return
+
+        self.prev_vr_pos = current_vr_pos
+
+        pos_scale = 0.01
+        angle_scale = 4.0
+        delta_limit = 0.01
+        angle_limit = 8.0
+
+        delta_x = max(-delta_limit, min(delta_limit, vr_x * pos_scale))
+        delta_y = max(-delta_limit, min(delta_limit, vr_y * pos_scale))
+        delta_z = max(-delta_limit, min(delta_limit, vr_z * pos_scale))
+
+        self.current_x += -delta_z  # VR Z -> robot X (direction flipped)
+        self.current_y += delta_y   # VR Y -> robot Y
+
+        # Wrist pitch (from wrist_flex_deg delta)
+        if getattr(vr_goal, "wrist_flex_deg", None) is not None:
+            if not hasattr(self, "prev_wrist_flex"):
+                self.prev_wrist_flex = vr_goal.wrist_flex_deg
+                return
+            delta_pitch = (vr_goal.wrist_flex_deg - self.prev_wrist_flex) * angle_scale
+            if abs(delta_pitch) > 30:
+                self.prev_wrist_flex = vr_goal.wrist_flex_deg
+                return
+            delta_pitch = max(-angle_limit, min(angle_limit, delta_pitch))
+            self.pitch = max(-90, min(90, self.pitch + delta_pitch))
+            self.prev_wrist_flex = vr_goal.wrist_flex_deg
+
+        # Wrist roll (absolute joint target)
+        if getattr(vr_goal, "wrist_roll_deg", None) is not None:
+            if not hasattr(self, "prev_wrist_roll"):
+                self.prev_wrist_roll = vr_goal.wrist_roll_deg
+                return
+            delta_roll = (vr_goal.wrist_roll_deg - self.prev_wrist_roll) * angle_scale
+            if abs(delta_roll) > 30:
+                self.prev_wrist_roll = vr_goal.wrist_roll_deg
+                return
+            delta_roll = max(-angle_limit, min(angle_limit, delta_roll))
+            current_roll = self.target_positions.get("wrist_roll", 0.0)
+            self.target_positions["wrist_roll"] = max(-90, min(90, current_roll + delta_roll))
+            self.prev_wrist_roll = vr_goal.wrist_roll_deg
+
+        # VR x-delta -> shoulder_pan
+        if abs(delta_x) > 0.001:
+            delta_pan = max(-angle_limit, min(angle_limit, delta_x * 200.0))
+            current_pan = self.target_positions.get("shoulder_pan", 0.0)
+            self.target_positions["shoulder_pan"] = max(-180, min(180, current_pan + delta_pan))
+
+        # IK -> shoulder_lift / elbow_flex (smoothed)
+        try:
+            j2, j3 = self.kin.inverse_kinematics(self.current_x, self.current_y)
+            alpha = 0.1
+            self.target_positions["shoulder_lift"] = (
+                (1 - alpha) * self.target_positions.get("shoulder_lift", 0.0) + alpha * j2
+            )
+            self.target_positions["elbow_flex"] = (
+                (1 - alpha) * self.target_positions.get("elbow_flex", 0.0) + alpha * j3
+            )
+        except Exception as e:
+            print(f"[{self.prefix}] VR IK failed: {e}")
+
+        # wrist_flex coupled to pitch (same as keyboard path)
+        self.target_positions["wrist_flex"] = (
+            -self.target_positions["shoulder_lift"]
+            - self.target_positions["elbow_flex"]
+            + self.pitch
+        )
+
+        # Gripper from trigger
+        trigger = 0.0
+        if getattr(vr_goal, "metadata", None):
+            trigger = vr_goal.metadata.get("trigger", 0.0) or 0.0
+        self.target_positions["gripper"] = 45 if trigger > 0.5 else 0.0
+
+        # Clamp all joints to soft VR limits
+        for j, (lo, hi) in JOINT_LIMITS.items():
+            if j in self.target_positions:
+                self.target_positions[j] = max(lo, min(hi, self.target_positions[j]))
+
     def p_control_targets(self, obs: dict[str, float]) -> dict[str, float]:
         """Returns {full_motor_name: normalized_target} to send as Goal_Position."""
         out: dict[str, float] = {}
@@ -484,6 +601,22 @@ class SimpleHeadControl:
         if key_state.get("head_motor_1-"): self.target_positions["head_motor_1"] -= self.degree_step
         if key_state.get("head_motor_2+"): self.target_positions["head_motor_2"] += self.degree_step
         if key_state.get("head_motor_2-"): self.target_positions["head_motor_2"] -= self.degree_step
+
+    def handle_vr_input(self, left_vr_goal) -> None:
+        """Left-controller thumbstick drives head pan/tilt.
+        Ported from 8_xlerobot_2wheels_teleop_vr.py:334-349."""
+        if left_vr_goal is None or not getattr(left_vr_goal, "metadata", None):
+            return
+        thumb = left_vr_goal.metadata.get("thumbstick") or {}
+        if not thumb:
+            return
+        tx = thumb.get("x", 0) or 0
+        ty = thumb.get("y", 0) or 0
+        step = 2  # monolith value (bigger than keyboard's 1)
+        if abs(tx) > 0.1:
+            self.target_positions["head_motor_1"] += step if tx > 0 else -step
+        if abs(ty) > 0.1:
+            self.target_positions["head_motor_2"] += step if ty > 0 else -step
 
     def reset(self) -> None:
         self.target_positions = dict(self.zero_pos)
@@ -621,6 +754,48 @@ def _degps_to_raw(degps: float) -> int:
     return max(-0x8000, min(0x7FFF, v))
 
 
+def get_vr_base_action(right_vr_goal) -> dict[str, float]:
+    """Right thumbstick -> base velocity command.
+    Ported from 8_xlerobot_2wheels_teleop_vr.py:379-406. Uses the max
+    speed level (same linear=0.3 angular=90 we already hard-code in
+    Phase 2). Deadzone 0.15 matches monolith."""
+    if right_vr_goal is None or not getattr(right_vr_goal, "metadata", None):
+        return {"x.vel": 0.0, "theta.vel": 0.0}
+    thumb = right_vr_goal.metadata.get("thumbstick") or {}
+    if not thumb:
+        return {"x.vel": 0.0, "theta.vel": 0.0}
+    tx = thumb.get("x", 0) or 0
+    ty = thumb.get("y", 0) or 0
+    level = SPEED_LEVELS[-1]
+    x_cmd = -ty * level["linear"] if abs(ty) > 0.15 else 0.0
+    theta_cmd = tx * level["angular"] if abs(tx) > 0.15 else 0.0
+    return {"x.vel": x_cmd, "theta.vel": theta_cmd}
+
+
+class _VRGoal:
+    """Lightweight attribute-bag that mimics ControlGoal for the ported
+    monolith code (which accesses `.target_position`, `.wrist_roll_deg`,
+    `.wrist_flex_deg`, `.metadata`)."""
+    __slots__ = ("target_position", "wrist_roll_deg", "wrist_flex_deg", "metadata")
+
+    def __init__(self, d: dict[str, Any] | None):
+        if not d:
+            self.target_position = None
+            self.wrist_roll_deg = None
+            self.wrist_flex_deg = None
+            self.metadata = {}
+            return
+        pos = d.get("position")
+        self.target_position = list(pos) if pos is not None else None
+        self.wrist_roll_deg = d.get("wrist_roll_deg")
+        self.wrist_flex_deg = d.get("wrist_flex_deg")
+        self.metadata = {
+            "trigger": d.get("trigger", 0.0),
+            "thumbstick": d.get("thumbstick") or {},
+            "buttons": d.get("buttons") or {},
+        }
+
+
 def body_to_wheel_raw(x: float, theta: float, max_raw: int = WHEEL_MAX_RAW) -> dict[str, int]:
     theta_rad = theta * (math.pi / 180.0)
     l_w = (x - theta_rad * WHEELBASE / 2) / WHEEL_RADIUS
@@ -732,9 +907,12 @@ def handle_client(conn: socket.socket, addr, args) -> None:
     if hello is None:
         print("[SRV] no hello in 5s; closing"); conn.close(); return
     bus_choice = str(hello["hello"].get("bus_choice", "2"))
+    mode = str(hello["hello"].get("mode", "keyboard")).lower()
+    if mode not in ("keyboard", "vr"):
+        mode = "keyboard"
     use_bus1 = bus_choice in ("1", "3")
     use_bus2 = bus_choice in ("2", "3")
-    print(f"[SRV] hello: bus_choice={bus_choice} (bus1={use_bus1} bus2={use_bus2})")
+    print(f"[SRV] hello: mode={mode} bus_choice={bus_choice} (bus1={use_bus1} bus2={use_bus2})")
 
     # Load calibration
     cal_path = Path.home() / ".cache/huggingface/lerobot/calibration/robots/xlerobot_2wheels/my_xlerobot_2wheels_lab.json"
@@ -789,6 +967,8 @@ def handle_client(conn: socket.socket, addr, args) -> None:
         print(f"[SRV] control loop starting @ {FPS} Hz")
         last_frame_time = time.time()
         pressed_keys: set[str] = set()
+        vr_left_goal: _VRGoal | None = None
+        vr_right_goal: _VRGoal | None = None
         loop_count = 0
         error_count = 0
         loop_dt = 1.0 / FPS
@@ -811,6 +991,11 @@ def handle_client(conn: socket.socket, addr, args) -> None:
                 if "keys" in f:
                     pressed_keys = set(f["keys"])
                     last_frame_time = loop_start
+                if "vr" in f:
+                    v = f["vr"] or {}
+                    vr_left_goal = _VRGoal(v.get("left"))
+                    vr_right_goal = _VRGoal(v.get("right"))
+                    last_frame_time = loop_start
                 if f.get("reset_left") and use_bus1:
                     left_arm.reset()
                 if f.get("reset_right") and use_bus2:
@@ -821,16 +1006,25 @@ def handle_client(conn: socket.socket, addr, args) -> None:
             dead_man = (loop_start - last_frame_time) > DEAD_MAN_SEC
             if dead_man:
                 pressed_keys = set()
+                vr_left_goal = None
+                vr_right_goal = None
                 base.stop()
 
-            # Map keys -> arm/head/base actions
-            left_state = {a: (k in pressed_keys) for a, k in LEFT_KEYMAP.items()}
-            right_state = {a: (k in pressed_keys) for a, k in RIGHT_KEYMAP.items()}
-            if use_bus1:
-                left_arm.handle_keys(left_state)
-                head.handle_keys(left_state)
-            if use_bus2:
-                right_arm.handle_keys(right_state)
+            # Map inputs -> arm/head/base target updates
+            if mode == "vr":
+                if use_bus1:
+                    left_arm.handle_vr_input(vr_left_goal)
+                    head.handle_vr_input(vr_left_goal)
+                if use_bus2:
+                    right_arm.handle_vr_input(vr_right_goal)
+            else:
+                left_state = {a: (k in pressed_keys) for a, k in LEFT_KEYMAP.items()}
+                right_state = {a: (k in pressed_keys) for a, k in RIGHT_KEYMAP.items()}
+                if use_bus1:
+                    left_arm.handle_keys(left_state)
+                    head.handle_keys(left_state)
+                if use_bus2:
+                    right_arm.handle_keys(right_state)
 
             try:
                 if use_bus1 and bus1 is not None:
@@ -848,14 +1042,27 @@ def handle_client(conn: socket.socket, addr, args) -> None:
                         right_targets = right_arm.p_control_targets(pos2)
                         bus2.write_positions(right_targets, use_sync=args.sync_write)
                         stall.update(bus2, RIGHT_ARM_MOTORS, pos2, right_targets)
-                    base_action = base.update(pressed_keys)
+
+                    # Base + Z-lift depend on mode
+                    if mode == "vr":
+                        base_action = get_vr_base_action(vr_right_goal)
+                        right_buttons = (vr_right_goal.metadata.get("buttons") or {}
+                                         ) if vr_right_goal else {}
+                        z_vel = 0
+                        if right_buttons.get(VR_Z_LIFT_UP_BUTTON):
+                            z_vel = Z_LIFT_VELOCITY
+                        elif right_buttons.get(VR_Z_LIFT_DOWN_BUTTON):
+                            z_vel = -Z_LIFT_VELOCITY
+                    else:
+                        base_action = base.update(pressed_keys)
+                        z_vel = 0
+                        if Z_LIFT_UP_KEY in pressed_keys:
+                            z_vel = Z_LIFT_VELOCITY
+                        elif Z_LIFT_DOWN_KEY in pressed_keys:
+                            z_vel = -Z_LIFT_VELOCITY
+
                     wheels = body_to_wheel_raw(base_action.get("x.vel", 0.0),
                                                 base_action.get("theta.vel", 0.0))
-                    z_vel = 0
-                    if Z_LIFT_UP_KEY in pressed_keys:
-                        z_vel = Z_LIFT_VELOCITY
-                    elif Z_LIFT_DOWN_KEY in pressed_keys:
-                        z_vel = -Z_LIFT_VELOCITY
                     wheels["z_lift"] = z_vel
                     bus2.write_wheel_velocities(wheels)
             except Exception as e:
