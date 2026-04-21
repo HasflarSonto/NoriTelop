@@ -252,12 +252,26 @@ def clamp_and_unnormalize(val: float, motor: Motor, cal: Calibration) -> int:
 # ---------------------------------------------------------------------------
 # Minimal Feetech bus wrapper
 # ---------------------------------------------------------------------------
+def _patch_setPacketTimeout(self, packet_length):  # noqa: N802
+    # Mirrors src/lerobot/motors/feetech/feetech.py:patch_setPacketTimeout.
+    # The stock scservo_sdk packet_timeout is tuned too tight for STS3215
+    # EEPROM commits (~10-50 ms). Without this, bus init issues ~100 register
+    # writes that silently time out and push the ack past the client's 10 s
+    # window, causing "TimeoutError: timed out" on the laptop.
+    self.packet_start_time = self.getCurrentTime()
+    overhead_ms = 500 if str(getattr(self, "port_name", "")).startswith("socket://") else 50
+    self.packet_timeout = (self.tx_time_per_byte * packet_length) + (self.tx_time_per_byte * 3.0) + overhead_ms
+
+
 class FeetechBus:
     def __init__(self, port: str, motors: dict[str, Motor], calibration: dict[str, Calibration]):
         self.port = port
         self.motors = motors
         self.calibration = calibration
         self.port_handler = scs.PortHandler(port)
+        self.port_handler.setPacketTimeout = _patch_setPacketTimeout.__get__(  # type: ignore[method-assign]
+            self.port_handler, scs.PortHandler
+        )
         self.packet_handler = scs.PacketHandler(0)
         self.id_to_name = {m.id: name for name, m in motors.items()}
 
