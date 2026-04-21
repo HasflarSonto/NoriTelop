@@ -19,8 +19,11 @@ Dead-man: if no client frame for 500 ms, wheels zero and arm targets freeze.
 from __future__ import annotations
 
 import argparse
+import http.server
 import json
 import math
+import os
+import signal
 import socket
 import sys
 import threading
@@ -843,6 +846,47 @@ def load_calibration(path: Path) -> dict[str, Calibration]:
 # ---------------------------------------------------------------------------
 # Server
 # ---------------------------------------------------------------------------
+ESTOP_PORT = 9091
+
+
+def _start_estop_listener(port: int = ESTOP_PORT):
+    """Tiny HTTP listener. POST /estop -> SIGINT self.
+
+    Triggered by the NoriScreen kiosk UI's E-STOP button, which fetches
+    http://127.0.0.1:9091/estop. The SIGINT lands in main()'s
+    KeyboardInterrupt path, which already tears the session down cleanly
+    (zeros wheels, disables torque).
+    """
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            if self.path == "/estop":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(b'{"status":"received"}')
+                print("[SRV] E-STOP received via HTTP — shutting down", flush=True)
+                os.kill(os.getpid(), signal.SIGINT)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
+
+        def log_message(self, *a, **k):
+            pass  # silence default access log
+
+    srv = http.server.HTTPServer(("127.0.0.1", port), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    print(f"[SRV] estop listener on http://127.0.0.1:{port}/estop", flush=True)
+    return srv
+
+
 class LineReader:
     """Non-blocking newline-delimited reader with timeout."""
     def __init__(self, sock: socket.socket):
@@ -1162,6 +1206,7 @@ def main():
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((args.host, args.port))
     srv.listen(1)
+    _start_estop_listener()
     print(f"[SRV] listening on {args.host}:{args.port} (dry_run={args.dry_run}, sync_write={args.sync_write})")
 
     try:

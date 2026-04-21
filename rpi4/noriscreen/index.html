@@ -1,0 +1,1334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no">
+<title>NoriScreen</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100vw; height: 100vh;
+    overflow: hidden;
+    background: #000;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #fff;
+    -webkit-user-select: none; user-select: none;
+    cursor: none;
+    touch-action: none;
+  }
+  canvas#face {
+    position: absolute; top: 0; left: 0;
+    width: 100vw; height: 100vh;
+  }
+
+  /* ---------- overlays ---------- */
+  #overlay {
+    position: absolute; top: 0; left: 0;
+    width: 100%; height: 100%;
+    pointer-events: none;
+    display: flex; flex-direction: column;
+    justify-content: flex-end;
+  }
+  #overlay > * { pointer-events: auto; }
+
+  /* bottom panel (progress / confirm / presets) */
+  #bottom-panel {
+    width: 100%;
+    padding: 12px 20px 14px;
+    display: flex; flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    transition: opacity 0.3s, transform 0.3s;
+    opacity: 0; transform: translateY(20px);
+    pointer-events: none;
+  }
+  #bottom-panel.visible {
+    opacity: 1; transform: translateY(0);
+    pointer-events: auto;
+  }
+
+  /* progress */
+  #progress-area { width: 100%; display: none; flex-direction: column; gap: 6px; align-items: center; }
+  #progress-area.active { display: flex; }
+  #progress-label {
+    font-size: 18px; font-weight: 500;
+    color: rgba(255,255,255,0.85);
+    text-align: center;
+    max-width: 600px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #progress-bar-track {
+    width: 360px; height: 10px;
+    background: rgba(255,255,255,0.12);
+    border-radius: 5px; overflow: hidden;
+  }
+  #progress-bar-fill {
+    height: 100%; width: 0%;
+    background: #fff;
+    border-radius: 5px;
+    transition: width 0.4s ease;
+  }
+
+  /* confirm */
+  #confirm-area { width: 100%; display: none; flex-direction: column; gap: 12px; align-items: center; }
+  #confirm-area.active { display: flex; }
+  #confirm-prompt {
+    font-size: 17px; color: rgba(255,255,255,0.85);
+    text-align: center; max-width: 600px;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  #confirm-buttons { display: flex; gap: 24px; }
+  .confirm-btn {
+    min-width: 150px; height: 64px;
+    border: none; border-radius: 32px;
+    font-size: 20px; font-weight: 600;
+    cursor: pointer; color: #000;
+    transition: transform 0.12s, opacity 0.12s;
+  }
+  .confirm-btn:active { transform: scale(0.94); opacity: 0.85; }
+  #btn-approve { background: #4ade80; }
+  #btn-reject  { background: #f87171; }
+
+  /* presets */
+  #preset-area { width: 100%; display: none; flex-wrap: wrap; gap: 8px; justify-content: center; }
+  #preset-area.active { display: flex; }
+  .preset-btn {
+    height: 40px; padding: 0 20px;
+    border: 1.5px solid rgba(255,255,255,0.25);
+    border-radius: 20px; background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.8); font-size: 15px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, transform 0.1s;
+  }
+  .preset-btn:active { transform: scale(0.94); background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.5); }
+
+  /* controls tray (revealed on double-tap) */
+  #controls-tray {
+    position: absolute; bottom: 0; left: 0; width: 100%;
+    display: flex; justify-content: space-between; align-items: flex-end;
+    padding: 14px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.3s;
+    z-index: 90;
+  }
+  #controls-tray.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* chat button */
+  #chat-btn {
+    width: 80px; height: 80px;
+    border-radius: 20px;
+    border: 1.5px solid rgba(255,255,255,0.18);
+    background: rgba(255,255,255,0.06);
+    color: rgba(255,255,255,0.55);
+    font-size: 14px; font-weight: 600;
+    line-height: 80px; text-align: center;
+    cursor: pointer;
+  }
+  #chat-btn:active { background: rgba(255,255,255,0.15); }
+
+  #chat-overlay {
+    position: absolute; bottom: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.85);
+    display: none; flex-direction: column; justify-content: center; align-items: center;
+    gap: 12px;
+  }
+  #chat-overlay.visible { display: flex; }
+  #chat-input {
+    width: 500px; height: 48px;
+    border: 1.5px solid rgba(255,255,255,0.3);
+    border-radius: 24px; background: rgba(255,255,255,0.08);
+    color: #fff; font-size: 18px;
+    padding: 0 20px; outline: none;
+  }
+  #chat-input::placeholder { color: rgba(255,255,255,0.35); }
+  #chat-send {
+    width: 120px; height: 44px;
+    border: none; border-radius: 22px;
+    background: rgba(255,255,255,0.15); color: #fff;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+  }
+  #chat-send:active { background: rgba(255,255,255,0.25); }
+  #chat-cancel {
+    background: none; border: none; color: rgba(255,255,255,0.4);
+    font-size: 14px; cursor: pointer; margin-top: 4px;
+  }
+
+  /* E-stop (inside controls tray) */
+  #estop {
+    width: 80px; height: 80px;
+    border-radius: 20px;
+    background: rgba(220, 38, 38, 0.7);
+    border: 2.5px solid rgba(255, 80, 80, 0.6);
+    color: #fff; font-size: 13px; font-weight: 700;
+    letter-spacing: 0.5px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  #estop:active { background: rgba(220, 38, 38, 1); }
+
+  /* disconnected indicator */
+  #disconnected {
+    position: absolute; top: 10px; right: 10px;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #f87171;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  #disconnected.show { opacity: 1; }
+
+  /* completed overlay text */
+  #completed-text {
+    position: absolute; width: 100%; text-align: center;
+    bottom: 90px; font-size: 28px; font-weight: 600;
+    color: rgba(255,255,255,0.85);
+    opacity: 0; transition: opacity 0.3s;
+    pointer-events: none;
+  }
+  #completed-text.visible { opacity: 1; }
+
+  /* error overlay */
+  #error-area {
+    position: absolute; width: 100%; text-align: center;
+    bottom: 80px; padding: 0 40px;
+    opacity: 0; transition: opacity 0.3s;
+    pointer-events: none;
+  }
+  #error-area.visible { opacity: 1; pointer-events: auto; }
+  #error-message {
+    font-size: 17px; color: rgba(255,255,255,0.75);
+    max-width: 500px; margin: 0 auto;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  #error-tap-hint {
+    font-size: 13px; color: rgba(255,255,255,0.35);
+    margin-top: 8px;
+  }
+
+  /* settings overlay */
+  #settings-overlay {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.92);
+    display: none; flex-direction: column;
+    justify-content: center; align-items: center; gap: 14px;
+    z-index: 200;
+  }
+  #settings-overlay.visible { display: flex; }
+  #settings-overlay label { color: rgba(255,255,255,0.7); font-size: 15px; }
+  #settings-ip {
+    width: 300px; height: 44px;
+    border: 1.5px solid rgba(255,255,255,0.3); border-radius: 22px;
+    background: rgba(255,255,255,0.08); color: #fff;
+    font-size: 18px; padding: 0 18px; outline: none; text-align: center;
+  }
+  #settings-save {
+    width: 120px; height: 40px;
+    border: none; border-radius: 20px;
+    background: rgba(255,255,255,0.15); color: #fff;
+    font-size: 15px; font-weight: 600; cursor: pointer;
+  }
+  #settings-close {
+    background: none; border: none; color: rgba(255,255,255,0.35);
+    font-size: 13px; cursor: pointer; margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="face" width="800" height="480"></canvas>
+
+<div id="overlay">
+  <div id="bottom-panel">
+    <div id="progress-area">
+      <div id="progress-label"></div>
+      <div id="progress-bar-track"><div id="progress-bar-fill"></div></div>
+    </div>
+    <div id="confirm-area">
+      <div id="confirm-prompt"></div>
+      <div id="confirm-buttons">
+        <button class="confirm-btn" id="btn-approve">Approve</button>
+        <button class="confirm-btn" id="btn-reject">Reject</button>
+      </div>
+    </div>
+    <div id="preset-area"></div>
+  </div>
+</div>
+
+<div id="controls-tray">
+  <button id="chat-btn">chat</button>
+  <button id="estop">E-STOP</button>
+</div>
+<div id="chat-overlay">
+  <input id="chat-input" type="text" placeholder="Type a message..." autocomplete="off" inputmode="text" enterkeyhint="send">
+  <button id="chat-send">Send</button>
+  <button id="chat-cancel">cancel</button>
+</div>
+<div id="disconnected"></div>
+<div id="completed-text">Done!</div>
+
+<div id="error-area">
+  <div id="error-message"></div>
+  <div id="error-tap-hint">tap to dismiss</div>
+</div>
+
+<div id="settings-overlay">
+  <label>Laptop IP Address</label>
+  <input id="settings-ip" type="text" placeholder="192.168.1.100">
+  <button id="settings-save">Save</button>
+  <button id="settings-close">cancel</button>
+</div>
+
+<script>
+// ========================================================
+// NoriScreen — HomeBot Face & Control Interface
+// Target: Raspberry Pi 4 + 7" DSI (800x480), Chromium kiosk
+// ========================================================
+
+(function () {
+  'use strict';
+
+  // ---- Config ----
+  let CONFIG = { laptop_ip: '192.168.1.100', ws_port: 9090, ws_path: '/screen', estop_port: 9091, estop_path: '/estop' };
+
+  async function loadConfig() {
+    try {
+      const r = await fetch('config.json');
+      const c = await r.json();
+      Object.assign(CONFIG, c);
+    } catch (e) { console.warn('config.json not found, using defaults'); }
+  }
+
+  // ---- DOM refs ----
+  const canvas     = document.getElementById('face');
+  const ctx        = canvas.getContext('2d');
+  const $overlay   = document.getElementById('overlay');
+  const $panel     = document.getElementById('bottom-panel');
+  const $progress  = document.getElementById('progress-area');
+  const $progLabel = document.getElementById('progress-label');
+  const $progFill  = document.getElementById('progress-bar-fill');
+  const $confirm   = document.getElementById('confirm-area');
+  const $confPrompt= document.getElementById('confirm-prompt');
+  const $btnApprove= document.getElementById('btn-approve');
+  const $btnReject = document.getElementById('btn-reject');
+  const $presetArea= document.getElementById('preset-area');
+  const $ctrlTray  = document.getElementById('controls-tray');
+  const $chatBtn   = document.getElementById('chat-btn');
+  const $chatOver  = document.getElementById('chat-overlay');
+  const $chatInput = document.getElementById('chat-input');
+  const $chatSend  = document.getElementById('chat-send');
+  const $chatCancel= document.getElementById('chat-cancel');
+  const $estop     = document.getElementById('estop');
+  const $disc      = document.getElementById('disconnected');
+  const $doneText  = document.getElementById('completed-text');
+  const $errorArea = document.getElementById('error-area');
+  const $errorMsg  = document.getElementById('error-message');
+  const $settings  = document.getElementById('settings-overlay');
+  const $settingsIp= document.getElementById('settings-ip');
+  const $settingsSave = document.getElementById('settings-save');
+  const $settingsClose= document.getElementById('settings-close');
+
+  // ---- State ----
+  const STATES = { IDLE: 'idle', EXECUTING: 'executing', CONFIRMING: 'confirming', COMPLETED: 'completed', ERROR: 'error', STOPPED: 'stopped' };
+  let state = STATES.IDLE;
+  let ws    = null;
+  let connected = false;
+  let reconnectTimer = null;
+
+  // Task tracking
+  let taskName = '';
+  let totalSteps = 0;
+  let currentStep = 0;
+  let stepName = '';
+  let confirmId = '';
+  let errorMessage = '';
+  let presets = [];
+
+  // ---- LVGL-style Emotion Face Engine ----
+  // Coordinate scaling: LVGL 502x410 → 800x480
+  const SCALE_X = 800 / 502;  // ~1.593
+  const SCALE_Y = 480 / 410;  // ~1.171
+  function sx(v) { return v * SCALE_X; }
+  function sy(v) { return v * SCALE_Y; }
+
+  // Per-axis eye shape tweak, applied on top of emo.eye_w / emo.eye_h
+  // at both draw sites. Tune here to taste.
+  const EYE_W_SCALE = 1.08;
+  const EYE_H_SCALE = 0.92;
+
+  // Canvas center
+  const CX = 400, CY = 210;
+  // Eye separation (LVGL ~70px from center each side)
+  const EYE_SEP = sx(100); // ~159px — wide apart
+
+  // Max corner radius (LVGL 15 scaled) — generous rounding
+  const MAX_RADIUS = Math.round(25 * SCALE_Y); // ~29px
+
+  // Gaze range (LVGL: X ~117px, Y ~63px → scaled)
+  const GAZE_RANGE_X = sx(65); // ~103px — reduced to keep eyes on screen
+  const GAZE_RANGE_Y = sy(63);  // ~73px
+
+  // Face offset when gaze at edges
+  const FACE_OFFSET_X = sx(12);
+  const FACE_OFFSET_Y = sy(15);
+
+  // Think offset (eyes shift right)
+  const THINK_OFFSET_X = sx(30);
+
+  function lerp(a, b, t) { return a + (b - a) * t; }
+  function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+  // ---- Emotion Configs ----
+  // Each emotion defines eye/mouth parameters (LVGL-scale, converted at use)
+  // Numeric: eye_h, eye_w, openness (0-1), mouth_curve (-1 to 1), mouth_open (0-1), mouth_w
+  // Boolean: no_mouth, angry_brows, look_side, tilt_eyes, cat_face
+  const EMOTIONS = {
+    eyes_only: {
+      eye_w: 80, eye_h: 330, openness: 1.0,
+      mouth_curve: 0, mouth_open: 0, mouth_w: 0,
+      no_mouth: true, angry_brows: false, look_side: false, tilt_eyes: false, cat_face: false,
+    },
+    neutral: {
+      eye_w: 80, eye_h: 330, openness: 1.0,
+      mouth_curve: 0, mouth_open: 0, mouth_w: 40,
+      no_mouth: false, angry_brows: false, look_side: false, tilt_eyes: false, cat_face: false,
+    },
+    happy: {
+      eye_w: 85, eye_h: 330, openness: 0.6,
+      mouth_curve: 0.8, mouth_open: 0, mouth_w: 55,
+      no_mouth: false, angry_brows: false, look_side: false, tilt_eyes: false, cat_face: false,
+    },
+    sad: {
+      eye_w: 80, eye_h: 310, openness: 0.65,
+      mouth_curve: -0.6, mouth_open: 0, mouth_w: 40,
+      no_mouth: false, angry_brows: false, look_side: false, tilt_eyes: true, cat_face: false,
+    },
+    angry: {
+      eye_w: 90, eye_h: 330, openness: 0.5,
+      mouth_curve: -0.4, mouth_open: 0, mouth_w: 45,
+      no_mouth: false, angry_brows: true, look_side: false, tilt_eyes: true, cat_face: false,
+    },
+    surprised: {
+      eye_w: 90, eye_h: 345, openness: 1.0,
+      mouth_curve: 0, mouth_open: 0.8, mouth_w: 40,
+      no_mouth: false, angry_brows: false, look_side: false, tilt_eyes: false, cat_face: false,
+    },
+    thinking: {
+      eye_w: 72, eye_h: 300, openness: 0.7,
+      mouth_curve: 0, mouth_open: 0, mouth_w: 35,
+      no_mouth: false, angry_brows: false, look_side: true, tilt_eyes: false, cat_face: false,
+    },
+    confused: {
+      eye_w: 85, eye_h: 320, openness: 0.8,
+      mouth_curve: -0.2, mouth_open: 0.15, mouth_w: 30,
+      no_mouth: false, angry_brows: false, look_side: false, tilt_eyes: true, cat_face: false,
+    },
+    excited: {
+      eye_w: 90, eye_h: 330, openness: 0.55,
+      mouth_curve: 1.0, mouth_open: 0, mouth_w: 65,
+      no_mouth: false, angry_brows: false, look_side: false, tilt_eyes: false, cat_face: false,
+    },
+    cat: {
+      eye_w: 80, eye_h: 320, openness: 0.85,
+      mouth_curve: 0.3, mouth_open: 0, mouth_w: 55,
+      no_mouth: false, angry_brows: false, look_side: false, tilt_eyes: false, cat_face: true,
+    },
+  };
+
+  // Numeric keys we interpolate
+  const NUMERIC_KEYS = ['eye_w', 'eye_h', 'openness', 'mouth_curve', 'mouth_open', 'mouth_w'];
+  // Boolean keys that snap at 50%
+  const BOOL_KEYS = ['no_mouth', 'angry_brows', 'look_side', 'tilt_eyes', 'cat_face'];
+
+  // ---- Emotion State ----
+  let currentEmotionName = 'neutral';
+  let targetEmotionName = 'neutral';
+  // Interpolated numeric values (start at neutral)
+  let emo = Object.assign({}, EMOTIONS.neutral);
+  // Interpolation progress 0..1 (1 = fully arrived)
+  let emotionT = 1.0;
+  const EMOTION_SPEED = 2.5; // transitions per second
+
+  // Previous emotion for boolean snapping
+  let prevEmoBools = {};
+  for (const k of BOOL_KEYS) prevEmoBools[k] = EMOTIONS.neutral[k];
+
+  function setEmotion(name) {
+    if (!EMOTIONS[name]) name = 'neutral';
+    if (name === targetEmotionName && emotionT >= 1) return;
+    // Snapshot current booleans for snapping
+    for (const k of BOOL_KEYS) prevEmoBools[k] = emo[k];
+    targetEmotionName = name;
+    emotionT = 0;
+  }
+
+  function updateEmotionInterpolation(dt) {
+    if (emotionT >= 1) return;
+    emotionT = Math.min(1, emotionT + (EMOTION_SPEED * dt / 1000));
+    const target = EMOTIONS[targetEmotionName];
+    // We lerp from whatever the current animated values were at transition start.
+    // Since we continuously update, just lerp current toward target each frame.
+    for (const k of NUMERIC_KEYS) {
+      emo[k] = lerp(emo[k], target[k], EMOTION_SPEED * dt / 1000);
+    }
+    // Booleans snap at 50% progress
+    for (const k of BOOL_KEYS) {
+      emo[k] = emotionT >= 0.5 ? target[k] : prevEmoBools[k];
+    }
+    if (emotionT >= 1) {
+      // Snap numeric to exact targets
+      for (const k of NUMERIC_KEYS) emo[k] = target[k];
+      for (const k of BOOL_KEYS) emo[k] = target[k];
+      currentEmotionName = targetEmotionName;
+    }
+  }
+
+  // Legacy mood variable (used by setState)
+  let mood = 'idle';
+  function setMood(m) {
+    mood = m;
+    // Map old mood names to new emotions
+    const moodToEmotion = {
+      idle: 'neutral',
+      executing: 'thinking',
+      confirming: 'confused',
+      completed: 'happy',
+      error: 'sad',
+      stopped: 'angry',
+    };
+    setEmotion(moodToEmotion[m] || 'neutral');
+  }
+
+  // ---- Blink System ----
+  // Each eye has its own blink state so winks use the same animation
+  const BLINK_CLOSE_MS = 60;
+  const BLINK_HOLD_MS = 30;
+  const BLINK_OPEN_MS = 140;
+
+  // Per-eye blink state
+  const blinkL = { phase: 0, t: 0, amount: 0 };
+  const blinkR = { phase: 0, t: 0, amount: 0 };
+  let blinkAccum = 0;
+  let nextBlink = 2000 + Math.random() * 3000;
+  // Convenience aliases used by drawEye
+  let blinkAmountL = 0;
+  let blinkAmountR = 0;
+
+  function runBlinkState(b, dt) {
+    if (b.phase === 0) {
+      b.amount = 0;
+    } else if (b.phase === 1) {
+      b.t += dt;
+      b.amount = Math.min(b.t / BLINK_CLOSE_MS, 1);
+      if (b.amount >= 1) { b.phase = 2; b.t = 0; }
+    } else if (b.phase === 2) {
+      b.t += dt;
+      b.amount = 1;
+      if (b.t >= BLINK_HOLD_MS) { b.phase = 3; b.t = 0; }
+    } else if (b.phase === 3) {
+      b.t += dt;
+      b.amount = 1 - Math.min(b.t / BLINK_OPEN_MS, 1);
+      if (b.amount <= 0) { b.phase = 0; b.t = 0; b.amount = 0; }
+    }
+  }
+
+  function triggerBlink(b) {
+    if (b.phase !== 0) return; // already blinking
+    b.phase = 1; b.t = 0;
+  }
+
+  function updateBlink(dt) {
+    if (mood === 'stopped') { blinkAmountL = 0; blinkAmountR = 0; return; }
+
+    // Idle timer triggers both eyes together
+    blinkAccum += dt;
+    if (blinkAccum >= nextBlink) {
+      blinkAccum = 0;
+      nextBlink = 2000 + Math.random() * 3000;
+      triggerBlink(blinkL);
+      triggerBlink(blinkR);
+    }
+
+    runBlinkState(blinkL, dt);
+    runBlinkState(blinkR, dt);
+    blinkAmountL = blinkL.amount;
+    blinkAmountR = blinkR.amount;
+  }
+
+  // ---- Breathing System ----
+  // Continuous 8% sine pulse on eye size at 1.5 rad/s
+  let breathTime = 0;
+  const BREATH_RATE = 1.5; // rad/s
+  const BREATH_AMP = 0.08; // 8%
+
+  function getBreathScale(dt) {
+    breathTime += dt / 1000;
+    return 1 + BREATH_AMP * Math.sin(breathTime * BREATH_RATE);
+  }
+
+  // ---- Gaze System ----
+  // Smooth lerp toward target gaze position
+  let gazeX = 0, gazeY = 0;         // current gaze (-1 to 1 normalized)
+  let gazeTargetX = 0, gazeTargetY = 0;
+  const GAZE_LERP_SPEED = 3.0; // per second
+
+  function updateGaze(dt) {
+    const t = Math.min(1, GAZE_LERP_SPEED * dt / 1000);
+    gazeX = lerp(gazeX, gazeTargetX, t);
+    gazeY = lerp(gazeY, gazeTargetY, t);
+  }
+
+  // Get pixel offset for gaze
+  function gazePixelX() { return gazeX * GAZE_RANGE_X; }
+  function gazePixelY() { return gazeY * GAZE_RANGE_Y; }
+
+  // Face offset: shifts when gaze hits edges
+  function faceOffsetX() { return gazeX * FACE_OFFSET_X; }
+  function faceOffsetY() { return gazeY * FACE_OFFSET_Y; }
+
+  // ---- Idle Behavior ----
+  let idleGazeTimer = 0;
+  let nextIdleGaze = 1500 + Math.random() * 2500; // 1.5-4s
+  let idleEmotionTimer = 0;
+  let nextIdleEmotion = 8000 + Math.random() * 12000; // 8-20s
+  let idleBehaviorActive = false;
+  // Previous emotion to restore after touch interactions
+  let preInteractionEmotion = null;
+
+  function updateIdleBehavior(dt) {
+    if (!idleBehaviorActive) return;
+
+    // Random gaze drift every 1.5-4s, biased toward center
+    idleGazeTimer += dt;
+    if (idleGazeTimer >= nextIdleGaze) {
+      idleGazeTimer = 0;
+      nextIdleGaze = 1500 + Math.random() * 2500;
+      // Bias toward center: multiply by 0.6 to keep mostly centered
+      gazeTargetX = (Math.random() * 2 - 1) * 0.6;
+      gazeTargetY = (Math.random() * 2 - 1) * 0.4;
+    }
+
+    // Random emotion changes disabled — stay on idle emotion
+    // idleEmotionTimer += dt;
+    // if (idleEmotionTimer >= nextIdleEmotion) {
+    //   idleEmotionTimer = 0;
+    //   nextIdleEmotion = 8000 + Math.random() * 12000;
+    //   const r = Math.random();
+    //   let pick;
+    //   if (r < 0.50)      pick = 'eyes_only';
+    //   else if (r < 0.70) pick = 'happy';
+    //   else if (r < 0.85) pick = 'thinking';
+    //   else if (r < 0.95) pick = 'neutral';
+    //   else                pick = 'excited';
+    //   setEmotion(pick);
+    // }
+  }
+
+  // ---- Drawing Utilities ----
+  function drawRoundedRect(cx, cy, w, h, r) {
+    const x = cx - w / 2, y = cy - h / 2;
+    r = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.arcTo(x + w, y, x + w, y + r, r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+    ctx.lineTo(x + r, y + h);
+    ctx.arcTo(x, y + h, x, y + h - r, r);
+    ctx.lineTo(x, y + r);
+    ctx.arcTo(x, y, x + r, y, r);
+    ctx.closePath();
+  }
+
+  function drawEye(cx, cy, w, h, openness, blinkAmt, tiltAdj) {
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    if (mood === 'stopped') {
+      // X eyes
+      const s = Math.min(w, h) * 0.4;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = sx(5);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-s, -s); ctx.lineTo(s, s);
+      ctx.moveTo(s, -s); ctx.lineTo(-s, s);
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+
+    // Apply openness and blink — this is how much of the eye is visible
+    const effectiveOpen = openness * (1 - blinkAmt);
+    // Minimum visible height so eyes never get too thin (except full blink)
+    const MIN_VIS_H = sy(35);
+    const rawVisH = h * effectiveOpen;
+    const visH = blinkAmt > 0.9 ? rawVisH : Math.max(rawVisH, MIN_VIS_H);
+    if (visH < 2) { ctx.restore(); return; }
+
+    // Clip region = the visible slit (eyelids closing from top & bottom)
+    // Uses rounded rect so narrowed eyes always have beveled edges
+    const clipR = Math.min(MAX_RADIUS, w / 2, visH / 2);
+    ctx.save();
+    drawRoundedRect(0, 0, w, visH, clipR);
+    ctx.clip();
+
+    // Draw the FULL-SIZE eye shape inside the clip
+    // The eye itself doesn't shrink — the clip hides the top/bottom
+    const eyeR = Math.min(MAX_RADIUS, w / 2, h / 2);
+    ctx.fillStyle = '#fff';
+    drawRoundedRect(0, 0, w, h, eyeR);
+    ctx.fill();
+
+    ctx.restore(); // clip
+    ctx.restore(); // translate
+  }
+
+  // ---- Mouth Drawing ----
+  function drawMouth(cx, cy) {
+    return; // DISABLED — all mouths off for now
+    if (emo.no_mouth) return;
+
+    const mw = sx(emo.mouth_w);
+    if (mw < 1) return;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+
+    if (emo.cat_face) {
+      // Cat :3 mouth — omega shape + whiskers
+      const mhalf = mw / 2;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = sx(3);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      // Omega/w shape for :3 — bigger, rounder bumps
+      const bumpH = sy(18); // vertical amplitude of bumps
+      ctx.beginPath();
+      // Left bump
+      ctx.moveTo(-mhalf, 0);
+      ctx.quadraticCurveTo(-mhalf * 0.5, bumpH, 0, sy(2));
+      // Right bump
+      ctx.quadraticCurveTo(mhalf * 0.5, bumpH, mhalf, 0);
+      ctx.stroke();
+
+      // Whiskers — 3 per side, fanning outward from mouth edges
+      const whiskerLen = sx(55);
+      ctx.lineWidth = sx(1.5);
+      // Each whisker has its own vertical start offset — closer together, further from mouth
+      const wGap = sx(20); // horizontal gap between mouth edge and whisker root
+      const whiskers = [
+        { startY: sy(-2), angle:  0.18 },  // top whisker
+        { startY: sy(5),  angle:  0    },  // middle whisker
+        { startY: sy(12), angle: -0.18 },  // bottom whisker
+      ];
+      for (const w of whiskers) {
+        // Left whiskers
+        ctx.beginPath();
+        ctx.moveTo(-mhalf - wGap, w.startY);
+        ctx.lineTo(-mhalf - wGap - whiskerLen * Math.cos(w.angle), w.startY - whiskerLen * Math.sin(w.angle));
+        ctx.stroke();
+        // Right whiskers
+        ctx.beginPath();
+        ctx.moveTo(mhalf + wGap, w.startY);
+        ctx.lineTo(mhalf + wGap + whiskerLen * Math.cos(w.angle), w.startY - whiskerLen * Math.sin(w.angle));
+        ctx.stroke();
+      }
+    } else if (emo.mouth_open > 0.3) {
+      // Surprised "O" circle
+      const radius = mw / 2 * clamp(emo.mouth_open, 0.3, 1);
+      const ry = radius * 1.2; // slightly taller
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, radius, ry, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // Inner dark
+      ctx.fillStyle = '#000';
+      ctx.beginPath();
+      ctx.ellipse(0, 0, radius - sx(3), ry - sy(3), 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else if (Math.abs(emo.mouth_curve) < 0.05) {
+      // Flat line
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = sx(2.5);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-mw / 2, 0);
+      ctx.lineTo(mw / 2, 0);
+      ctx.stroke();
+    } else if (emo.mouth_curve > 0) {
+      // Smile arc
+      const curveY = sy(18) * emo.mouth_curve;
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = sx(2.5);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-mw / 2, 0);
+      ctx.quadraticCurveTo(0, curveY, mw / 2, 0);
+      ctx.stroke();
+    } else {
+      // Frown arc
+      const curveY = sy(18) * emo.mouth_curve; // negative
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = sx(2.5);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(-mw / 2, 0);
+      ctx.quadraticCurveTo(0, curveY, mw / 2, 0);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  // ---- Angry Brows ----
+  function drawBrows(lx, ly, rx, ry, eyeW, eyeH) {
+    if (!emo.angry_brows) return;
+    const browW = eyeW * 1.1;
+    const browH = sy(6);
+    const gap = sy(12); // gap above eye top
+    ctx.fillStyle = '#fff';
+
+    // Left brow — angled down toward center
+    ctx.save();
+    ctx.translate(lx, ly - eyeH / 2 - gap);
+    ctx.rotate(0.15); // slight inward angle
+    ctx.fillRect(-browW / 2, -browH / 2, browW, browH);
+    ctx.restore();
+
+    // Right brow — angled down toward center (mirror)
+    ctx.save();
+    ctx.translate(rx, ry - eyeH / 2 - gap);
+    ctx.rotate(-0.15);
+    ctx.fillRect(-browW / 2, -browH / 2, browW, browH);
+    ctx.restore();
+  }
+
+  // ---- Render ----
+  function render(breathScale) {
+    ctx.clearRect(0, 0, 800, 480);
+
+    // Panel offset (shift face up when bottom panel visible)
+    const panelUp = (state === STATES.EXECUTING || state === STATES.CONFIRMING) ? -40 : 0;
+
+    // Face offset from gaze at edges
+    const fOfsX = faceOffsetX();
+    const fOfsY = faceOffsetY() + panelUp;
+
+    // Think offset: eyes shift right when look_side is active
+    const thinkOfs = emo.look_side ? THINK_OFFSET_X : 0;
+
+    // Gaze pixel offsets
+    const gPx = gazePixelX();
+    const gPy = gazePixelY();
+
+    // Eye sizes from emotion config, scaled
+    const baseW = sx(emo.eye_w) * EYE_W_SCALE;
+    const baseH = sy(emo.eye_h) * EYE_H_SCALE * breathScale;
+
+    // Tilt: asymmetric eye heights
+    let tiltAdjL = 0, tiltAdjR = 0;
+    if (emo.tilt_eyes) {
+      tiltAdjL = -sy(15); // left eye slightly shorter
+      tiltAdjR = sy(15);  // right eye slightly taller
+    }
+
+    // Eye positions — gaze shifts eyes together
+    const lx = CX - EYE_SEP + fOfsX + gPx * 0.8 + thinkOfs;
+    const ly = CY + fOfsY + gPy * 0.8;
+    const rx = CX + EYE_SEP + fOfsX + gPx * 0.8 + thinkOfs;
+    const ry = CY + fOfsY + gPy * 0.8;
+
+    const lH = baseH + tiltAdjL;
+    const rH = baseH + tiltAdjR;
+
+    // Draw eyes
+    drawEye(lx, ly, baseW, lH, emo.openness, blinkAmountL, 0);
+    drawEye(rx, ry, baseW, rH, emo.openness, blinkAmountR, 0);
+
+    // Draw angry brows
+    drawBrows(lx, ly, rx, ry, baseW, lH);
+
+    // Draw mouth below eyes
+    const mouthY = CY + sy(135) + fOfsY;
+    const mouthX = CX + fOfsX + thinkOfs;
+    drawMouth(mouthX, mouthY);
+  }
+
+  // ---- Animation loop ----
+  let lastTime = 0;
+
+  function frame(time) {
+    const dt = lastTime ? Math.min(time - lastTime, 50) : 16; // cap at 50ms
+    lastTime = time;
+
+    updateEmotionInterpolation(dt);
+    updateBlink(dt);
+    const breathScale = getBreathScale(dt);
+    updateGaze(dt);
+    updateIdleBehavior(dt);
+    render(breathScale);
+
+    requestAnimationFrame(frame);
+  }
+
+  // ---- State machine ----
+  function setState(newState) {
+    const prev = state;
+    state = newState;
+
+    // Hide all sub-areas
+    $progress.classList.remove('active');
+    $confirm.classList.remove('active');
+    $presetArea.classList.remove('active');
+    $panel.classList.remove('visible');
+    $doneText.classList.remove('visible');
+    $errorArea.classList.remove('visible');
+
+    // Disable idle behavior by default; re-enable only in IDLE
+    idleBehaviorActive = false;
+
+    switch (newState) {
+      case STATES.IDLE:
+        // Idle: activate idle behavior (random emotions + gaze drift)
+        idleBehaviorActive = true;
+        idleGazeTimer = 0;
+        idleEmotionTimer = 0;
+        setEmotion('neutral');
+        mood = 'idle';
+        gazeTargetX = 0; gazeTargetY = 0;
+        // Show presets + chat if available
+        if (presets.length > 0) {
+          $presetArea.classList.add('active');
+          $panel.classList.add('visible');
+        }
+        break;
+
+      case STATES.EXECUTING:
+        // Alternate thinking/neutral
+        mood = 'executing';
+        setEmotion(Math.random() < 0.6 ? 'thinking' : 'neutral');
+        gazeTargetX = 0; gazeTargetY = 0;
+        $progress.classList.add('active');
+        $panel.classList.add('visible');
+        updateProgressUI();
+        break;
+
+      case STATES.CONFIRMING:
+        mood = 'confirming';
+        setEmotion('confused');
+        gazeTargetX = 0; gazeTargetY = 0;
+        $confirm.classList.add('active');
+        $panel.classList.add('visible');
+        break;
+
+      case STATES.COMPLETED:
+        mood = 'completed';
+        setEmotion('happy');
+        gazeTargetX = 0; gazeTargetY = 0;
+        $doneText.classList.add('visible');
+        // After 1s switch to excited
+        setTimeout(() => {
+          if (state === STATES.COMPLETED) setEmotion('excited');
+        }, 1000);
+        // Return to idle after 3s
+        setTimeout(() => {
+          if (state === STATES.COMPLETED) setState(STATES.IDLE);
+        }, 3000);
+        break;
+
+      case STATES.ERROR:
+        mood = 'error';
+        setEmotion('sad');
+        gazeTargetX = 0; gazeTargetY = 0;
+        $errorMsg.textContent = errorMessage;
+        $errorArea.classList.add('visible');
+        // Return to idle after 8s or on tap
+        setTimeout(() => {
+          if (state === STATES.ERROR) setState(STATES.IDLE);
+        }, 8000);
+        break;
+
+      case STATES.STOPPED:
+        mood = 'stopped';
+        setEmotion('angry');
+        gazeTargetX = 0; gazeTargetY = 0;
+        break;
+    }
+  }
+
+  function updateProgressUI() {
+    const label = stepName
+      ? `Step ${currentStep}/${totalSteps}: ${stepName}`
+      : `Step ${currentStep}/${totalSteps}`;
+    $progLabel.textContent = taskName ? `${taskName} — ${label}` : label;
+    const pct = totalSteps > 0 ? (currentStep / totalSteps) * 100 : 0;
+    $progFill.style.width = pct + '%';
+  }
+
+  // ---- WebSocket ----
+  function connectWS() {
+    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+
+    const url = `ws://${CONFIG.laptop_ip}:${CONFIG.ws_port}${CONFIG.ws_path}`;
+    console.log('Connecting to', url);
+    ws = new WebSocket(url);
+
+    ws.onopen = () => {
+      connected = true;
+      $disc.classList.remove('show');
+      clearTimeout(reconnectTimer);
+      console.log('WebSocket connected');
+    };
+
+    ws.onclose = () => {
+      connected = false;
+      $disc.classList.add('show');
+      ws = null;
+      scheduleReconnect();
+    };
+
+    ws.onerror = (e) => {
+      console.warn('WebSocket error', e);
+      ws.close();
+    };
+
+    ws.onmessage = (evt) => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch (e) { return; }
+      handleMessage(msg);
+    };
+  }
+
+  function scheduleReconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connectWS, 2000);
+  }
+
+  function sendMsg(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(obj));
+    }
+  }
+
+  function handleMessage(msg) {
+    switch (msg.type) {
+      case 'task_start':
+        taskName = msg.task_name || '';
+        totalSteps = msg.total_steps || 0;
+        currentStep = 0;
+        stepName = '';
+        setState(STATES.EXECUTING);
+        break;
+
+      case 'step_update':
+        currentStep = msg.current_step || 0;
+        stepName = msg.step_name || '';
+        totalSteps = msg.total_steps || totalSteps;
+        if (state === STATES.EXECUTING) updateProgressUI();
+        break;
+
+      case 'confirm_request':
+        confirmId = msg.id || '';
+        $confPrompt.textContent = msg.prompt || 'Confirm action?';
+        setState(STATES.CONFIRMING);
+        break;
+
+      case 'task_complete':
+        setState(STATES.COMPLETED);
+        break;
+
+      case 'task_error':
+        errorMessage = msg.message || 'An error occurred';
+        setState(STATES.ERROR);
+        break;
+
+      case 'set_mood':
+        if (msg.mood === 'idle' && state === STATES.STOPPED) {
+          setState(STATES.IDLE);
+        } else if (msg.mood) {
+          // Support both old mood names (via setMood) and direct emotion names
+          if (EMOTIONS[msg.mood]) {
+            setEmotion(msg.mood);
+          } else {
+            setMood(msg.mood);
+          }
+        }
+        break;
+
+      case 'set_presets':
+        presets = msg.presets || [];
+        renderPresets();
+        // If idle, show them
+        if (state === STATES.IDLE && presets.length > 0) {
+          $presetArea.classList.add('active');
+          $panel.classList.add('visible');
+        }
+        break;
+    }
+  }
+
+  // ---- Presets ----
+  function renderPresets() {
+    $presetArea.innerHTML = '';
+    for (const label of presets) {
+      const btn = document.createElement('button');
+      btn.className = 'preset-btn';
+      btn.textContent = label;
+      btn.addEventListener('pointerup', () => {
+        sendMsg({ type: 'user_message', text: label });
+      });
+      $presetArea.appendChild(btn);
+    }
+  }
+
+  // ---- E-stop ----
+  $estop.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    // Immediate visual response
+    setState(STATES.STOPPED);
+    // Send via WebSocket
+    sendMsg({ type: 'estop', timestamp: Date.now() });
+    // Redundant HTTP POST
+    fetch(`http://${CONFIG.laptop_ip}:${CONFIG.estop_port}${CONFIG.estop_path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: 'estop', timestamp: Date.now() }),
+    }).catch(() => {}); // fire and forget
+  });
+
+  // ---- Confirm buttons ----
+  $btnApprove.addEventListener('pointerup', () => {
+    sendMsg({ type: 'confirm_response', id: confirmId, approved: true });
+    setState(STATES.EXECUTING);
+  });
+  $btnReject.addEventListener('pointerup', () => {
+    sendMsg({ type: 'confirm_response', id: confirmId, approved: false });
+    setState(STATES.EXECUTING);
+  });
+
+  // ---- Touch Interactions (petting + eye poke) ----
+  let isPetting = false;
+  let dragStartX = 0, dragStartY = 0;
+  let dragMoved = false;
+  let pokeTimeout = null;
+
+  // Get canvas-relative coordinates from pointer event
+  function canvasXY(e) {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) / rect.width * 800,
+      y: (e.clientY - rect.top) / rect.height * 480,
+    };
+  }
+
+  // Check if a point is inside an eye bounding box
+  function hitTestEye(px, py) {
+    // Current eye positions (approximate from last render)
+    const panelUp = (state === STATES.EXECUTING || state === STATES.CONFIRMING) ? -40 : 0;
+    const fOfsX = faceOffsetX();
+    const fOfsY = faceOffsetY() + panelUp;
+    const thinkOfs = emo.look_side ? THINK_OFFSET_X : 0;
+    const gPx = gazePixelX();
+    const gPy = gazePixelY();
+    const baseW = sx(emo.eye_w) * EYE_W_SCALE;
+    const baseH = sy(emo.eye_h) * EYE_H_SCALE;
+
+    const lx = CX - EYE_SEP + fOfsX + gPx * 0.3 + thinkOfs;
+    const ly = CY + fOfsY + gPy * 0.3;
+    const rx = CX + EYE_SEP + fOfsX + gPx * 0.3 + thinkOfs;
+    const ry = CY + fOfsY + gPy * 0.3;
+
+    if (Math.abs(px - lx) < baseW / 2 && Math.abs(py - ly) < baseH / 2) return 'left';
+    if (Math.abs(px - rx) < baseW / 2 && Math.abs(py - ry) < baseH / 2) return 'right';
+    return null;
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    const { x, y } = canvasXY(e);
+    dragStartX = x;
+    dragStartY = y;
+    dragMoved = false;
+    isPetting = false;
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    const { x, y } = canvasXY(e);
+    const dx = x - dragStartX, dy = y - dragStartY;
+    if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+      dragMoved = true;
+    }
+    if (dragMoved) {
+      // Petting: face follows finger
+      if (!isPetting) {
+        isPetting = true;
+        preInteractionEmotion = targetEmotionName;
+        setEmotion('cat');
+      }
+      // Steer gaze toward finger — high sensitivity, small moves = big response
+      gazeTargetX = clamp((x - CX) / 120, -1, 1);
+      gazeTargetY = clamp((y - CY) / 80, -1, 1);
+    }
+  });
+
+  // ---- Double-tap to show/hide controls tray ----
+  let lastTapTime = 0;
+  let controlsVisible = false;
+  let controlsHideTimer = null;
+
+  function showControls() {
+    controlsVisible = true;
+    $ctrlTray.classList.add('visible');
+    // Auto-hide after 5 seconds of no interaction
+    clearTimeout(controlsHideTimer);
+    controlsHideTimer = setTimeout(hideControls, 5000);
+  }
+
+  function hideControls() {
+    controlsVisible = false;
+    $ctrlTray.classList.remove('visible');
+    clearTimeout(controlsHideTimer);
+  }
+
+  canvas.addEventListener('pointerup', (e) => {
+    const { x, y } = canvasXY(e);
+
+    if (isPetting) {
+      // Release after petting: switch to happy, then restore
+      isPetting = false;
+      setEmotion('happy');
+      gazeTargetX = 0; gazeTargetY = 0;
+      // After 1.5s, restore previous emotion (if still idle)
+      setTimeout(() => {
+        if (state === STATES.IDLE && targetEmotionName === 'happy') {
+          setEmotion(preInteractionEmotion || 'neutral');
+        }
+      }, 1500);
+      return;
+    }
+
+    // Eye poke detection (only on taps, not drags)
+    if (!dragMoved) {
+      const eyeHit = hitTestEye(x, y);
+      if (eyeHit) {
+        // Trigger a real animated blink on that eye, brief sad reaction
+        triggerBlink(eyeHit === 'left' ? blinkL : blinkR);
+        const prevEmo = targetEmotionName;
+        setEmotion('sad');
+        clearTimeout(pokeTimeout);
+        pokeTimeout = setTimeout(() => {
+          if (targetEmotionName === 'sad') {
+            setEmotion(prevEmo || 'neutral');
+          }
+        }, 600);
+        return; // don't process as double-tap
+      }
+    }
+
+    // Double-tap detection (only when no drag and no eye poke)
+    if (!dragMoved) {
+      const now = Date.now();
+      if (now - lastTapTime < 350) {
+        // Double-tap detected
+        if (controlsVisible) {
+          hideControls();
+        } else {
+          showControls();
+        }
+        lastTapTime = 0;
+      } else {
+        lastTapTime = now;
+      }
+    }
+  });
+
+  // Keep controls visible while interacting with them
+  $ctrlTray.addEventListener('pointerdown', () => {
+    clearTimeout(controlsHideTimer);
+  });
+  $ctrlTray.addEventListener('pointerup', () => {
+    clearTimeout(controlsHideTimer);
+    controlsHideTimer = setTimeout(hideControls, 5000);
+  });
+
+  // Long-press on chat button opens settings instead
+  let longPressTimer = null;
+  $chatBtn.addEventListener('pointerdown', () => {
+    longPressTimer = setTimeout(() => {
+      $settingsIp.value = CONFIG.laptop_ip;
+      $settings.classList.add('visible');
+      hideControls();
+    }, 2000);
+  });
+  $chatBtn.addEventListener('pointerup', (e) => {
+    if (longPressTimer) {
+      clearTimeout(longPressTimer);
+      // Short tap = open chat
+      if (!$settings.classList.contains('visible')) {
+        $chatOver.classList.add('visible');
+        $chatInput.value = '';
+        $chatInput.focus();
+        hideControls();
+      }
+    }
+  });
+  $chatBtn.addEventListener('pointercancel', () => clearTimeout(longPressTimer));
+
+  // ---- Chat ----
+  $chatCancel.addEventListener('pointerup', () => {
+    $chatOver.classList.remove('visible');
+  });
+  $chatSend.addEventListener('pointerup', () => {
+    const text = $chatInput.value.trim();
+    if (text) {
+      sendMsg({ type: 'user_message', text });
+      $chatInput.value = '';
+    }
+    $chatOver.classList.remove('visible');
+  });
+  $chatInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') $chatSend.click();
+    if (e.key === 'Escape') $chatCancel.click();
+  });
+
+  // ---- Error dismiss ----
+  $errorArea.addEventListener('pointerup', () => {
+    if (state === STATES.ERROR) setState(STATES.IDLE);
+  });
+
+  $settingsSave.addEventListener('pointerup', () => {
+    const ip = $settingsIp.value.trim();
+    if (ip) {
+      CONFIG.laptop_ip = ip;
+      $settings.classList.remove('visible');
+      // Reconnect with new IP
+      if (ws) ws.close();
+      connectWS();
+    }
+  });
+  $settingsClose.addEventListener('pointerup', () => {
+    $settings.classList.remove('visible');
+  });
+
+  // ---- Init ----
+  async function init() {
+    await loadConfig();
+    setState(STATES.IDLE);
+    requestAnimationFrame(frame);
+    connectWS();
+  }
+
+  init();
+
+})();
+</script>
+</body>
+</html>

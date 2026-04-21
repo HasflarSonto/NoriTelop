@@ -1,0 +1,7 @@
+{
+  "laptop_ip": "127.0.0.1",
+  "ws_port": 9090,
+  "ws_path": "/screen",
+  "estop_port": 9091,
+  "estop_path": "/estop"
+}
