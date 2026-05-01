@@ -35,11 +35,12 @@ RESET_LEFT_KEY = "c"
 RESET_RIGHT_KEY = "0"
 RESET_HEAD_KEY = "?"
 
-# Diagnostic threshold for the live grip-current readout.
-# Bumped above the steady-state idle so prints only happen during squeezes.
+# Live grip-current readout. Prints once per second regardless of squeeze state
+# so you always see the live value (raw int + estimated mA) — useful for
+# calibrating GRIP_IDLE_CURRENT / GRIP_MAX_CURRENT in 9_phase2_vr_record.py.
+# `*` annotates when the gripper is being squeezed (current above threshold).
 GRIP_CURRENT_PRINT_THRESHOLD = 30
-# How many telemetry frames between prints when the threshold is exceeded.
-GRIP_PRINT_INTERVAL = 5
+GRIP_PRINT_INTERVAL_S = 1.0
 
 
 class KeyTracker:
@@ -177,7 +178,7 @@ def main() -> int:
 
     sock.setblocking(False)
     dt = 1.0 / FPS
-    grip_print_counter = 0
+    last_grip_print = 0.0
     try:
         while True:
             t0 = time.time()
@@ -212,14 +213,23 @@ def main() -> int:
                         continue
                     if "stalled" in msg and msg["stalled"]:
                         print(f"[SRV] stalled: {msg['stalled']} ({msg.get('loop_hz','?')} Hz)")
-                    # Live grip-current readout — useful for calibrating
-                    # GRIP_IDLE_CURRENT / GRIP_MAX_CURRENT in 9_phase2_vr_record.py.
+                    # Live readout for both grippers (whichever buses are
+                    # active). Once-per-second status line so you always
+                    # see live values, with `*` when squeezing.
                     if "currents" in msg:
-                        g_raw = msg["currents"].get("right_arm_gripper", 0)
-                        if abs(g_raw) >= GRIP_CURRENT_PRINT_THRESHOLD:
-                            grip_print_counter += 1
-                            if grip_print_counter % GRIP_PRINT_INTERVAL == 0:
-                                print(f"[GRIP] {g_raw:4d} raw  ≈ {abs(g_raw)*6.5:.0f} mA")
+                        now_grip = time.time()
+                        if now_grip - last_grip_print >= GRIP_PRINT_INTERVAL_S:
+                            currents = msg["currents"]
+                            parts = []
+                            for arm_label, motor_name in (("L", "left_arm_gripper"),
+                                                          ("R", "right_arm_gripper")):
+                                if motor_name in currents:
+                                    raw = currents[motor_name]
+                                    mark = "*" if abs(raw) >= GRIP_CURRENT_PRINT_THRESHOLD else " "
+                                    parts.append(f"{arm_label}{mark}{raw:4d} (~{abs(raw)*6.5:4.0f}mA)")
+                            if parts:
+                                print(f"[GRIP] {' | '.join(parts)}")
+                                last_grip_print = now_grip
             except BlockingIOError:
                 pass
             except OSError:
