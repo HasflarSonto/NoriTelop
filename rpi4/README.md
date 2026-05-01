@@ -173,8 +173,11 @@ JSON-line TCP. Server listens on 7777, accepts one client at a time.
 
 ```jsonc
 {"ts_ns": 12345678901234,                          // Pi monotonic_ns
- "state": {"right_arm_shoulder_pan": 12.4, ...}}   // current motor positions in degrees
+ "state":    {"right_arm_shoulder_pan": 12.4, ...},// current motor positions in degrees
+ "currents": {"right_arm_gripper": 87, ...}}       // signed Present_Current raw int per motor
 ```
+
+`currents` powers the **virtual tactile signal**: motor current is proportional to torque, and on the TPU gripper that maps directly to contact force as the jaws compress on an object. The recording client (`9_phase2_vr_record.py`) normalizes the gripper current via `compute_grip_force(raw)` and stores both raw and normalized as `observation.state` channels in the dataset. Tunable constants `GRIP_IDLE_CURRENT` and `GRIP_MAX_CURRENT` at the top of the recording script — calibrate empirically by squeezing known-stiffness objects.
 
 Every `TELEMETRY_INTERVAL` (10) loops the same line additionally carries:
 

@@ -1199,9 +1199,21 @@ def handle_client(conn: socket.socket, addr, args) -> None:
                 state_dict.update(pos)
             if pos2:
                 state_dict.update(pos2)
+            # Per-motor signed raw current. Used laptop-side as a virtual
+            # tactile signal (current ∝ torque ⇒ proxy for contact force on
+            # the TPU gripper). Doesn't gate motor control if read fails.
+            currents_dict: dict[str, int] = {}
+            try:
+                if use_bus2 and bus2 is not None:
+                    currents_dict.update(bus2.sync_read_currents(RIGHT_ARM_MOTORS))
+                if use_bus1 and bus1 is not None:
+                    currents_dict.update(bus1.sync_read_currents(LEFT_ARM_MOTORS + HEAD_MOTORS))
+            except Exception:
+                pass
             tele: dict[str, object] = {
                 "ts_ns": time.monotonic_ns(),
                 "state": state_dict,
+                "currents": currents_dict,
             }
             if loop_count % TELEMETRY_INTERVAL == 0:
                 now = time.time()

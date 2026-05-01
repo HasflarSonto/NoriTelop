@@ -96,6 +96,31 @@ JOINT_LIMITS = {
 }
 
 
+# ───────── Virtual tactile sensor (grip force) ─────────
+# STS3215 Present_Current is signed raw int (~6.5 mA per unit). Current is
+# proportional to motor torque, so on the TPU gripper we get a continuous
+# force-proxy signal as the jaws compress on a contact. Calibrate by:
+#   1. close gripper on nothing — read steady current → GRIP_IDLE_CURRENT
+#   2. squeeze a hard object firmly until StallDetector engages — pre-clamp
+#      peak → GRIP_MAX_CURRENT
+# StallDetector then drops Torque_Limit so the upper bound naturally
+# saturates here (which is the intended "fully gripping" point).
+GRIP_IDLE_CURRENT = 25
+GRIP_MAX_CURRENT  = 200
+
+
+def compute_grip_force(raw_current: int) -> float:
+    """Map signed Present_Current → normalized grip force in [0, 1].
+
+    abs() because current direction = motion direction, not load sign — we
+    care about magnitude. Linear-with-clamp is good enough for v1; switch
+    to f**2 if soft-object resolution is too coarse (see plan).
+    """
+    mag = abs(raw_current)
+    f = (mag - GRIP_IDLE_CURRENT) / max(1, GRIP_MAX_CURRENT - GRIP_IDLE_CURRENT)
+    return max(0.0, min(1.0, f))
+
+
 # ────────────────────── VR teleop ───────────────────────
 # Ported from 8_xlerobot_2wheels_teleop_vr.py:77-294.
 # Same algorithm as the direct-USB script 9 — laptop owns IK + delta control.
@@ -224,6 +249,7 @@ class TcpControlClient:
         self.bus_choice = bus_choice
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._latest_state: dict[str, float] = {}
+        self._latest_currents: dict[str, int] = {}
         self._latest_ts_ns: int = 0
         self._state_lock = threading.Lock()
         self._stop = threading.Event()
@@ -282,6 +308,9 @@ class TcpControlClient:
                         with self._state_lock:
                             self._latest_state = msg["state"]
                             self._latest_ts_ns = msg.get("ts_ns", time.monotonic_ns())
+                    if "currents" in msg:
+                        with self._state_lock:
+                            self._latest_currents = msg["currents"]
                     if msg.get("stalled"):
                         print(f"[SRV] stalled: {msg['stalled']} (loop_hz={msg.get('loop_hz')})")
             except socket.timeout:
@@ -302,6 +331,10 @@ class TcpControlClient:
         with self._state_lock:
             return self._latest_ts_ns, dict(self._latest_state)
 
+    def get_latest_currents(self) -> dict[str, int]:
+        with self._state_lock:
+            return dict(self._latest_currents)
+
     def disconnect(self) -> None:
         self._stop.set()
         try:
@@ -317,11 +350,19 @@ class TcpControlClient:
 # ───────────────────── Dataset machinery ─────────────────────
 
 def init_dataset(cameras_ft: dict[str, tuple[int, int, int]]) -> LeRobotDataset:
-    """Build LeRobotDataset features = right-arm 6 DOF + cameras."""
-    joint_features = {key: float for key in RIGHT_ARM_STATE_KEYS}
+    """Build LeRobotDataset features = right-arm 6 DOF (action+state) + grip
+    force (state only) + cameras (state only)."""
+    action_features = {key: float for key in RIGHT_ARM_STATE_KEYS}
+    # State carries the same 6 joints as action, plus the virtual tactile
+    # signals: raw current (forensic / model-internal) and normalized force.
+    state_joint_features = {
+        **action_features,
+        "right_arm_gripper_current": float,
+        "right_arm_grip_force":      float,
+    }
     features: dict[str, dict] = {}
-    features.update(hw_to_dataset_features(joint_features, ACTION))
-    features.update(hw_to_dataset_features(joint_features, OBS_STR))
+    features.update(hw_to_dataset_features(action_features, ACTION))
+    features.update(hw_to_dataset_features(state_joint_features, OBS_STR))
     features.update(hw_to_dataset_features(cameras_ft, OBS_STR))
 
     print(f"[REC] features: {list(features.keys())}")
@@ -524,6 +565,11 @@ def main() -> int:
                     if all(k in state for k in RIGHT_ARM_STATE_KEYS):
                         action_values = {k: arm_targets[k.removesuffix(".pos")] for k in RIGHT_ARM_STATE_KEYS}
                         state_values = {k: state[k] for k in RIGHT_ARM_STATE_KEYS}
+                        # Virtual tactile observations from Pi-shipped currents.
+                        currents = tcp.get_latest_currents()
+                        gripper_raw = currents.get("right_arm_gripper", 0)
+                        state_values["right_arm_gripper_current"] = float(gripper_raw)
+                        state_values["right_arm_grip_force"] = compute_grip_force(gripper_raw)
                         cam_values = {"head": head_img, "right_wrist": wrist_img}
 
                         action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)

@@ -35,6 +35,12 @@ RESET_LEFT_KEY = "c"
 RESET_RIGHT_KEY = "0"
 RESET_HEAD_KEY = "?"
 
+# Diagnostic threshold for the live grip-current readout.
+# Bumped above the steady-state idle so prints only happen during squeezes.
+GRIP_CURRENT_PRINT_THRESHOLD = 30
+# How many telemetry frames between prints when the threshold is exceeded.
+GRIP_PRINT_INTERVAL = 5
+
 
 class KeyTracker:
     """Thread-safe pressed-key set fed by a suppressed pynput listener.
@@ -171,6 +177,7 @@ def main() -> int:
 
     sock.setblocking(False)
     dt = 1.0 / FPS
+    grip_print_counter = 0
     try:
         while True:
             t0 = time.time()
@@ -205,6 +212,14 @@ def main() -> int:
                         continue
                     if "stalled" in msg and msg["stalled"]:
                         print(f"[SRV] stalled: {msg['stalled']} ({msg.get('loop_hz','?')} Hz)")
+                    # Live grip-current readout — useful for calibrating
+                    # GRIP_IDLE_CURRENT / GRIP_MAX_CURRENT in 9_phase2_vr_record.py.
+                    if "currents" in msg:
+                        g_raw = msg["currents"].get("right_arm_gripper", 0)
+                        if abs(g_raw) >= GRIP_CURRENT_PRINT_THRESHOLD:
+                            grip_print_counter += 1
+                            if grip_print_counter % GRIP_PRINT_INTERVAL == 0:
+                                print(f"[GRIP] {g_raw:4d} raw  ≈ {abs(g_raw)*6.5:.0f} mA")
             except BlockingIOError:
                 pass
             except OSError:
