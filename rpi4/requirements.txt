@@ -1,3 +1,5 @@
 pyserial==3.5
 feetech-servo-sdk==1.0.0
 numpy
+pyzmq
+opencv-python-headless

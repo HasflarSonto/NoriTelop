@@ -2,19 +2,37 @@
 
 Runs on the RPi4. Owns /dev/xlerobot_bus1 and /dev/xlerobot_bus2 directly via
 scservo_sdk (no ser2net hop). Accepts one JSON-over-TCP client on port 7777
-which sends pressed-keys frames ~50 Hz; this process runs the real 50 Hz
-control loop (P-control on arms/head, smooth accel/decel on wheels, stall
-detection).
+which sends frames ~50 Hz; this process runs the real 50 Hz control loop
+(P-control on arms/head, smooth accel/decel on wheels, stall detection).
 
 Ser2net must be stopped before running this (use start_teleop.sh).
 
 Protocol:
     Client hello:   {"hello": {"bus_choice": "1"|"2"|"3"}}
     Server ack:     {"ack": true, "initial_obs": {motor_name: pos, ...}}
-    Client frame:   {"keys": ["w","a",...]}
+
+    Client frame (any subset of fields below; all optional except need at least one):
+        {"keys": ["w","a",...]}                          # keyboard mode
+        {"vr": {"left": {...}, "right": {...}}}          # VR mode (Pi-side IK)
+        {"arm_targets": {motor: goal_deg, ...}}          # NEW: laptop pre-IK'd targets
+        {"wheel_targets": {"x.vel": ..., "theta.vel": ...}}  # NEW: explicit base velocity
+        {"reset_left|right|head": true}
+
     Client bye:     {"bye": true}
 
+    Server telemetry (every loop, JSON line):
+        {"ts_ns": int (Pi monotonic_ns at telemetry send),
+         "state": {motor_name: pos_deg, ...}}
+    Plus every TELEMETRY_INTERVAL loops, the same line also carries:
+         "loop_hz", "errors", "stalled"
+
 Dead-man: if no client frame for 500 ms, wheels zero and arm targets freeze.
+
+When `arm_targets` is present in a frame, those values overwrite the per-arm
+P-control targets directly (laptop owns the IK / target generation). The
+server's local P-control still runs against current positions — only the
+target source changes. This makes it back-compat with keyboard `keys[]` and
+forward-compat with laptop-driven VR teleop.
 """
 from __future__ import annotations
 
@@ -593,6 +611,19 @@ class SimpleTeleopArm:
             if j in self.target_positions:
                 self.target_positions[j] = max(lo, min(hi, self.target_positions[j]))
 
+    def apply_external_targets(self, full_name_targets: dict[str, float]) -> None:
+        """Overwrite target_positions from a dict keyed by full motor names.
+
+        The laptop client already runs IK and sends absolute joint goal
+        positions in degrees (e.g. {"right_arm_shoulder_pan": 12.5, ...}).
+        We translate full → short via the inverse joint_map and copy in.
+        Only joints in our joint_map are consumed; everything else is ignored
+        so a single frame can carry both arms' targets harmlessly.
+        """
+        for short, full in self.joint_map.items():
+            if full in full_name_targets:
+                self.target_positions[short] = float(full_name_targets[full])
+
     def p_control_targets(self, obs: dict[str, float]) -> dict[str, float]:
         """Returns {full_motor_name: normalized_target} to send as Goal_Position."""
         out: dict[str, float] = {}
@@ -637,6 +668,13 @@ class SimpleHeadControl:
 
     def reset(self) -> None:
         self.target_positions = dict(self.zero_pos)
+
+    def apply_external_targets(self, full_name_targets: dict[str, float]) -> None:
+        """Same idea as SimpleTeleopArm.apply_external_targets but the head's
+        target keys ARE the full motor names already, so no remap needed."""
+        for name in self.target_positions:
+            if name in full_name_targets:
+                self.target_positions[name] = float(full_name_targets[name])
 
     def p_control_targets(self, obs: dict[str, float]) -> dict[str, float]:
         out: dict[str, float] = {}
@@ -1043,6 +1081,7 @@ def handle_client(conn: socket.socket, addr, args) -> None:
             except ConnectionError:
                 print("[SRV] client disconnected")
                 break
+            wheel_override: dict[str, float] | None = None
             for f in frames:
                 if "bye" in f:
                     print("[SRV] client said bye"); raise StopIteration
@@ -1053,6 +1092,23 @@ def handle_client(conn: socket.socket, addr, args) -> None:
                     v = f["vr"] or {}
                     vr_left_goal = _VRGoal(v.get("left"))
                     vr_right_goal = _VRGoal(v.get("right"))
+                    last_frame_time = loop_start
+                if "arm_targets" in f and f["arm_targets"]:
+                    # Laptop has done the IK and is sending absolute joint goals
+                    # in degrees. Filter to each controller's own joints.
+                    at = f["arm_targets"]
+                    if use_bus1:
+                        left_arm.apply_external_targets(at)
+                        head.apply_external_targets(at)
+                    if use_bus2:
+                        right_arm.apply_external_targets(at)
+                    last_frame_time = loop_start
+                if "wheel_targets" in f and f["wheel_targets"]:
+                    wt = f["wheel_targets"]
+                    wheel_override = {
+                        "x.vel": float(wt.get("x.vel", 0.0)),
+                        "theta.vel": float(wt.get("theta.vel", 0.0)),
+                    }
                     last_frame_time = loop_start
                 if f.get("reset_left") and use_bus1:
                     left_arm.reset()
@@ -1084,6 +1140,8 @@ def handle_client(conn: socket.socket, addr, args) -> None:
                 if use_bus2:
                     right_arm.handle_keys(right_state)
 
+            pos: dict[str, float] | None = None
+            pos2: dict[str, float] | None = None
             try:
                 if use_bus1 and bus1 is not None:
                     pos = bus1.sync_read_positions(LEFT_ARM_MOTORS + HEAD_MOTORS)
@@ -1101,8 +1159,13 @@ def handle_client(conn: socket.socket, addr, args) -> None:
                         bus2.write_positions(right_targets, use_sync=args.sync_write)
                         stall.update(bus2, RIGHT_ARM_MOTORS, pos2, right_targets)
 
-                    # Base + Z-lift depend on mode
-                    if mode == "vr":
+                    # Base + Z-lift depend on mode (or are explicitly overridden
+                    # by laptop-sent wheel_targets — in which case we skip the
+                    # mode-specific computation entirely).
+                    if wheel_override is not None:
+                        base_action = wheel_override
+                        z_vel = 0
+                    elif mode == "vr":
                         base_action = get_vr_base_action(vr_right_goal)
                         right_buttons = (vr_right_goal.metadata.get("buttons") or {}
                                          ) if vr_right_goal else {}
@@ -1128,19 +1191,30 @@ def handle_client(conn: socket.socket, addr, args) -> None:
                 if error_count < 5 or error_count % 50 == 0:
                     print(f"[SRV] loop error #{error_count}: {e}")
 
-            # Telemetry every N loops
+            # Telemetry: state every loop (so the laptop can record at 30+ Hz);
+            # loop_hz / stall info bundled in only every TELEMETRY_INTERVAL loops.
             frames_since_report += 1
+            state_dict: dict[str, float] = {}
+            if pos:
+                state_dict.update(pos)
+            if pos2:
+                state_dict.update(pos2)
+            tele: dict[str, object] = {
+                "ts_ns": time.monotonic_ns(),
+                "state": state_dict,
+            }
             if loop_count % TELEMETRY_INTERVAL == 0:
                 now = time.time()
                 hz = frames_since_report / max(0.001, (now - t_last_report))
                 frames_since_report = 0
                 t_last_report = now
-                try:
-                    tele = {"loop_hz": round(hz, 1), "errors": error_count,
-                             "stalled": [n for n, s in stall.stalled.items() if s]}
-                    conn.sendall((json.dumps(tele) + "\n").encode())
-                except OSError:
-                    print("[SRV] client write failed; ending session"); break
+                tele["loop_hz"] = round(hz, 1)
+                tele["errors"] = error_count
+                tele["stalled"] = [n for n, s in stall.stalled.items() if s]
+            try:
+                conn.sendall((json.dumps(tele) + "\n").encode())
+            except OSError:
+                print("[SRV] client write failed; ending session"); break
 
             # Pace the loop
             remaining = loop_dt - (time.time() - loop_start)
