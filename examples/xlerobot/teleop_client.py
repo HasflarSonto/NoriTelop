@@ -1,9 +1,18 @@
 """Phase 2: Laptop-side teleop client.
 
-Captures pressed keys at 50 Hz via lerobot.KeyboardTeleop and ships them as
-JSON lines to rpi4/teleop_server.py (port 7777). All control logic lives on
-the Pi. Set XLEROBOT_BRIDGE=<host-or-IP> to point at the server (same env
-var used by Phase 1).
+Captures pressed keys at 50 Hz via a global pynput listener (with suppression
+so digits/letters don't leak into the terminal that's running this script)
+and ships them as JSON lines to rpi4/teleop_server.py (port 7777). All
+control logic lives on the Pi. Set XLEROBOT_BRIDGE=<host-or-IP> to point at
+the server (same env var used by Phase 1).
+
+While the listener is active, ALL keystrokes are routed to this script and
+hidden from other windows — that's the price of "no terminal echo while
+teleoping". Press ESC (or Ctrl-C) to release the keyboard.
+
+Note: on macOS, suppress=True needs both Accessibility AND Input Monitoring
+permission for the terminal in System Settings → Privacy & Security. On
+Linux/X11 it works without extra setup; on Wayland it's a no-op.
 
 Usage:
     $env:XLEROBOT_BRIDGE = "xlerobot.local"  # PowerShell
@@ -13,9 +22,10 @@ import json
 import os
 import socket
 import sys
+import threading
 import time
 
-from lerobot.teleoperators.keyboard.teleop_keyboard import KeyboardTeleop, KeyboardTeleopConfig
+from pynput import keyboard as pyn_keyboard
 
 SERVER_PORT = 7777
 FPS = 50
@@ -24,6 +34,66 @@ FPS = 50
 RESET_LEFT_KEY = "c"
 RESET_RIGHT_KEY = "0"
 RESET_HEAD_KEY = "?"
+
+
+class KeyTracker:
+    """Thread-safe pressed-key set fed by a suppressed pynput listener.
+
+    suppress=True makes the OS-level hook consume each keystroke so it
+    doesn't echo into the terminal or other foreground apps. The script
+    still gets the events via on_press / on_release. ESC sets a quit flag
+    instead of being sent as a key.
+    """
+
+    def __init__(self) -> None:
+        self._pressed: set[str] = set()
+        self._lock = threading.Lock()
+        self._quit = False
+        self._listener: pyn_keyboard.Listener | None = None
+
+    def start(self) -> None:
+        self._listener = pyn_keyboard.Listener(
+            on_press=self._on_press,
+            on_release=self._on_release,
+            suppress=True,
+        )
+        self._listener.start()
+
+    def stop(self) -> None:
+        if self._listener is not None:
+            try:
+                self._listener.stop()
+            except Exception:
+                pass
+            self._listener = None
+
+    def _key_char(self, key) -> str | None:
+        # pynput delivers KeyCode for printable characters and Key for
+        # specials. We only care about chars (a-z, digits, punct).
+        return getattr(key, "char", None)
+
+    def _on_press(self, key) -> None:
+        if key == pyn_keyboard.Key.esc:
+            self._quit = True
+            return
+        ch = self._key_char(key)
+        if ch is not None:
+            with self._lock:
+                self._pressed.add(ch)
+
+    def _on_release(self, key) -> None:
+        ch = self._key_char(key)
+        if ch is not None:
+            with self._lock:
+                self._pressed.discard(ch)
+
+    def snapshot(self) -> set[str]:
+        with self._lock:
+            return set(self._pressed)
+
+    @property
+    def quit_requested(self) -> bool:
+        return self._quit
 
 
 def print_banner() -> None:
@@ -91,17 +161,24 @@ def main() -> int:
         print(f"[CLIENT] server refused: {ack.get('error','?')}"); return 1
     print(f"[CLIENT] ack received, {len(ack.get('initial_obs', {}))} initial positions")
 
-    # Start keyboard
-    keyboard = KeyboardTeleop(KeyboardTeleopConfig())
-    keyboard.connect()
+    # Start keyboard listener AFTER the input() prompt finishes, so the
+    # bus-choice readline isn't suppressed.
+    tracker = KeyTracker()
+    tracker.start()
     print_banner()
+    print("[CLIENT] keyboard suppression active — keystrokes won't echo "
+          "to the terminal. Press ESC or Ctrl-C to release.\n")
 
     sock.setblocking(False)
     dt = 1.0 / FPS
     try:
         while True:
             t0 = time.time()
-            pressed = set(keyboard.get_action().keys())
+            if tracker.quit_requested:
+                print("\n[CLIENT] ESC pressed")
+                break
+
+            pressed = tracker.snapshot()
 
             frame = {
                 "keys": sorted(pressed),
@@ -139,13 +216,14 @@ def main() -> int:
     except KeyboardInterrupt:
         print("\n[CLIENT] Ctrl-C")
     finally:
+        # Always release the keyboard hook, even if something else blew up.
+        tracker.stop()
         try:
             sock.sendall((json.dumps({"bye": True}) + "\n").encode())
         except OSError:
             pass
         try: sock.close()
         except OSError: pass
-        keyboard.disconnect()
     return 0
 
 

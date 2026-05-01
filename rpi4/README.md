@@ -310,7 +310,9 @@ The XLeRobot uses 1:345 plastic-gear servos that **die quickly under sustained s
 
 ## Troubleshooting
 
-**`teleop_client.py` connects but the robot doesn't move (macOS)** — `pynput` needs Accessibility permission. System Settings → Privacy & Security → Accessibility → add Terminal.app, then quit and relaunch the terminal.
+**`teleop_client.py` connects but the robot doesn't move (macOS)** — `pynput` needs both **Accessibility** AND **Input Monitoring** permission for the terminal. System Settings → Privacy & Security → add Terminal.app under each, then quit and relaunch the terminal. Input Monitoring is required because the client uses `suppress=True` on the listener (so keys don't echo into the terminal while teleoping).
+
+**Keys echo into the terminal as `99997333>>>><` while teleoping** — the listener didn't install in suppression mode. Almost always missing macOS Input Monitoring permission, or running on Linux + Wayland (which doesn't expose a global keyboard hook). Fix the permission, or switch to an X11 session.
 
 **`getaddrinfo failed` on `xlerobot.local`** — mDNS isn't resolving. Use the IP directly: `XLEROBOT_BRIDGE=<ip>`.
 
