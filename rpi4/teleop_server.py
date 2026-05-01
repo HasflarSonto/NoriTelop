@@ -752,10 +752,14 @@ class StallDetector:
         self.stalled: dict[str, bool] = {}
         self.retried: dict[str, bool] = {}
         self.stall_target: dict[str, float] = {}
+        # Last currents read per motor across all updates() — exposed so the
+        # telemetry block can ship them without a redundant sync_read.
+        self.last_currents: dict[str, int] = {}
 
     def update(self, bus: FeetechBus, motor_names: list[str],
                positions: dict[str, float], targets: dict[str, float] | None = None) -> list[str]:
         currents = bus.sync_read_currents(motor_names)
+        self.last_currents.update(currents)
         newly_stalled: list[str] = []
         for name in motor_names:
             pos = positions.get(name, 0.0)
@@ -1201,15 +1205,12 @@ def handle_client(conn: socket.socket, addr, args) -> None:
                 state_dict.update(pos2)
             # Per-motor signed raw current. Used laptop-side as a virtual
             # tactile signal (current ∝ torque ⇒ proxy for contact force on
-            # the TPU gripper). Doesn't gate motor control if read fails.
-            currents_dict: dict[str, int] = {}
-            try:
-                if use_bus2 and bus2 is not None:
-                    currents_dict.update(bus2.sync_read_currents(RIGHT_ARM_MOTORS))
-                if use_bus1 and bus1 is not None:
-                    currents_dict.update(bus1.sync_read_currents(LEFT_ARM_MOTORS + HEAD_MOTORS))
-            except Exception:
-                pass
+            # the TPU gripper). Read from StallDetector's cache — it already
+            # pulls Present_Current once per loop per active bus, so a
+            # redundant sync_read here would double the bus I/O cost and
+            # slow the 50 Hz loop. (Earlier version did exactly that and
+            # caused TCP send stalls on hotspot WiFi.)
+            currents_dict: dict[str, int] = dict(stall.last_currents)
             tele: dict[str, object] = {
                 "ts_ns": time.monotonic_ns(),
                 "state": state_dict,
