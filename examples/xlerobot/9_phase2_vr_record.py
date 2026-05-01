@@ -99,14 +99,21 @@ JOINT_LIMITS = {
 # ───────── Virtual tactile sensor (grip force) ─────────
 # STS3215 Present_Current is signed raw int (~6.5 mA per unit). Current is
 # proportional to motor torque, so on the TPU gripper we get a continuous
-# force-proxy signal as the jaws compress on a contact. Calibrate by:
-#   1. close gripper on nothing — read steady current → GRIP_IDLE_CURRENT
-#   2. squeeze a hard object firmly until StallDetector engages — pre-clamp
-#      peak → GRIP_MAX_CURRENT
-# StallDetector then drops Torque_Limit so the upper bound naturally
-# saturates here (which is the intended "fully gripping" point).
-GRIP_IDLE_CURRENT = 25
-GRIP_MAX_CURRENT  = 200
+# force-proxy signal as the jaws compress on a contact.
+#
+# Calibration recipe — run teleop_client.py to see live `[GRIP]` readings:
+#   1. close gripper through air, no contact — note the highest values
+#      you see during free motion. That's the friction floor (no contact).
+#      Set GRIP_IDLE_CURRENT slightly above this so jogging registers as 0.
+#   2. squeeze a firm object until you see "[SRV] stalled" from the server.
+#      The raw value just before the stall is GRIP_MAX_CURRENT — that's
+#      the natural saturation point set by StallDetector.
+#
+# Tuned from real measurements on Antonio's left_arm_gripper (2026-05):
+#   - jogging in air: peaks at 7-18 raw
+#   - pre-stall squeeze peak: ~90 raw
+GRIP_IDLE_CURRENT = 20
+GRIP_MAX_CURRENT  = 90
 
 
 def compute_grip_force(raw_current: int) -> float:
